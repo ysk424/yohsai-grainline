@@ -1,0 +1,24 @@
+schema_version = "1.0.0"
+
+id = "yohsai"
+version = "0.1.0"
+name = "Yohsai"
+tagline = "Yohsai clothing construction scaffold"
+maintainer = "Yohsai Developers"
+type = "add-on"
+
+blender_version_min = "5.1.0"
+
+license = ["SPDX:MIT"]
+
+tags = ["Modeling", "Pipeline"]
+
+[build]
+paths = [
+    "__init__.py",
+    "ui.py",
+    "yohsai_defaults.json",
+    "README.md",
+    "DEVELOPMENT_NOTES.md",
+    "LICENSE",
+]
