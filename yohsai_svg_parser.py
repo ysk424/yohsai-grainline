@@ -1,0 +1,607 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+"""Standalone Illustrator SVG to Yohsai JSON converter.
+
+This module deliberately depends only on the Python standard library. Blender
+starts it in a separate process; it never imports bpy or shares Blender state.
+"""
+
+from __future__ import annotations
+
+import json
+import math
+import os
+import re
+import sys
+import xml.etree.ElementTree as ET
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Iterable
+
+
+OUTPUT_FILENAME = "yohsai_pattern.json"
+TEMP_FILENAME = OUTPUT_FILENAME + ".tmp"
+SCHEMA_NAME = "yohsai-pattern"
+SCHEMA_VERSION = "1.0.0"
+
+
+class ParseError(ValueError):
+    """An SVG does not satisfy the Yohsai input profile."""
+
+
+@dataclass(frozen=True)
+class Point:
+    x: float
+    y: float
+
+    def as_json(self, scale: float) -> list[float]:
+        # SVG points down; Yohsai's two-dimensional coordinate system points up.
+        return [_clean_float(self.x * scale), _clean_float(-self.y * scale)]
+
+
+@dataclass(frozen=True)
+class Matrix:
+    a: float = 1.0
+    b: float = 0.0
+    c: float = 0.0
+    d: float = 1.0
+    e: float = 0.0
+    f: float = 0.0
+
+    def apply(self, point: Point) -> Point:
+        return Point(
+            self.a * point.x + self.c * point.y + self.e,
+            self.b * point.x + self.d * point.y + self.f,
+        )
+
+    def __matmul__(self, other: "Matrix") -> "Matrix":
+        """Compose matrices so (parent @ local).apply(p) applies local first."""
+        return Matrix(
+            self.a * other.a + self.c * other.b,
+            self.b * other.a + self.d * other.b,
+            self.a * other.c + self.c * other.d,
+            self.b * other.c + self.d * other.d,
+            self.a * other.e + self.c * other.f + self.e,
+            self.b * other.e + self.d * other.f + self.f,
+        )
+
+
+@dataclass
+class Segment:
+    kind: str
+    start: Point
+    end: Point
+    control1: Point | None = None
+    control2: Point | None = None
+    sewing_group: str | None = None
+    fold: bool = False
+
+    def transformed(self, matrix: Matrix) -> "Segment":
+        return Segment(
+            self.kind,
+            matrix.apply(self.start),
+            matrix.apply(self.end),
+            matrix.apply(self.control1) if self.control1 else None,
+            matrix.apply(self.control2) if self.control2 else None,
+        )
+
+    def points_for_distance(self, steps: int = 64) -> list[Point]:
+        if self.kind == "line":
+            return [self.start, self.end]
+        assert self.control1 is not None and self.control2 is not None
+        return [
+            _cubic_point(self.start, self.control1, self.control2, self.end, i / steps)
+            for i in range(steps + 1)
+        ]
+
+    def length(self) -> float:
+        points = self.points_for_distance(steps=256)
+        return sum(_distance(a, b) for a, b in zip(points, points[1:]))
+
+
+@dataclass
+class Subpath:
+    segments: list[Segment] = field(default_factory=list)
+    closed: bool = False
+
+    def transformed(self, matrix: Matrix) -> "Subpath":
+        return Subpath([segment.transformed(matrix) for segment in self.segments], self.closed)
+
+
+@dataclass
+class PathRecord:
+    source_id: str | None
+    subpaths: list[Subpath]
+    document_index: int
+
+
+@dataclass(frozen=True)
+class Annotation:
+    text: str
+    position: Point
+
+
+@dataclass
+class Panel:
+    panel_id: str
+    source_path_id: str | None
+    segments: list[Segment]
+
+
+_NUMBER = r"[-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?"
+_TOKEN_RE = re.compile(rf"[A-Za-z]|{_NUMBER}")
+_NUMBER_RE = re.compile(_NUMBER)
+_TRANSFORM_RE = re.compile(r"([A-Za-z]+)\s*\(([^)]*)\)")
+_SCALE_RE = re.compile(r"^@s\s*(" + _NUMBER + r")\s*cm$", re.IGNORECASE)
+_SEW_RE = re.compile(r"^[A-Z]$", re.IGNORECASE)
+
+
+def _clean_float(value: float) -> float:
+    if not math.isfinite(value):
+        raise ParseError("A calculated coordinate is not finite.")
+    if abs(value) < 1.0e-15:
+        return 0.0
+    return value
+
+
+def _local_name(tag: str) -> str:
+    return tag.rsplit("}", 1)[-1]
+
+
+def _numbers(value: str) -> list[float]:
+    remainder = _NUMBER_RE.sub("", value).replace(",", "").strip()
+    if remainder:
+        raise ParseError(f"Invalid numeric list: {value!r}")
+    result = [float(item) for item in _NUMBER_RE.findall(value)]
+    if not all(math.isfinite(item) for item in result):
+        raise ParseError("A transform contains a non-finite number.")
+    return result
+
+
+def parse_transform(value: str | None) -> Matrix:
+    if not value or not value.strip():
+        return Matrix()
+    matches = list(_TRANSFORM_RE.finditer(value))
+    remainder = _TRANSFORM_RE.sub("", value).replace(",", "").strip()
+    if remainder:
+        raise ParseError(f"Invalid SVG transform: {value!r}")
+    result = Matrix()
+    for match in matches:
+        name = match.group(1).lower()
+        args = _numbers(match.group(2))
+        if name == "matrix" and len(args) == 6:
+            current = Matrix(*args)
+        elif name == "translate" and len(args) in (1, 2):
+            current = Matrix(e=args[0], f=args[1] if len(args) == 2 else 0.0)
+        elif name == "scale" and len(args) in (1, 2):
+            current = Matrix(a=args[0], d=args[1] if len(args) == 2 else args[0])
+        elif name == "rotate" and len(args) in (1, 3):
+            radians = math.radians(args[0])
+            rotation = Matrix(a=math.cos(radians), b=math.sin(radians), c=-math.sin(radians), d=math.cos(radians))
+            if len(args) == 3:
+                cx, cy = args[1:]
+                current = Matrix(e=cx, f=cy) @ rotation @ Matrix(e=-cx, f=-cy)
+            else:
+                current = rotation
+        elif name == "skewx" and len(args) == 1:
+            current = Matrix(c=math.tan(math.radians(args[0])))
+        elif name == "skewy" and len(args) == 1:
+            current = Matrix(b=math.tan(math.radians(args[0])))
+        else:
+            raise ParseError(f"Unsupported or malformed SVG transform: {match.group(0)!r}")
+        result = result @ current
+    return result
+
+
+def _tokenize_path(data: str) -> list[str]:
+    tokens = _TOKEN_RE.findall(data)
+    remainder = _TOKEN_RE.sub("", data).replace(",", "").strip()
+    if remainder:
+        raise ParseError(f"Invalid SVG path syntax near {remainder[:30]!r}.")
+    if not tokens:
+        raise ParseError("An SVG path in CLOTHES has no path data.")
+    return tokens
+
+
+def _is_command(token: str) -> bool:
+    return len(token) == 1 and token.isalpha()
+
+
+def parse_path_data(data: str) -> list[Subpath]:
+    tokens = _tokenize_path(data)
+    index = 0
+    command: str | None = None
+    current = Point(0.0, 0.0)
+    subpath_start: Point | None = None
+    previous_cubic_control: Point | None = None
+    active: Subpath | None = None
+    subpaths: list[Subpath] = []
+
+    def read(count: int) -> list[float]:
+        nonlocal index
+        if index + count > len(tokens) or any(_is_command(token) for token in tokens[index:index + count]):
+            raise ParseError(f"SVG path command {command!r} has too few parameters.")
+        values = [float(token) for token in tokens[index:index + count]]
+        index += count
+        if not all(math.isfinite(value) for value in values):
+            raise ParseError("An SVG path contains a non-finite coordinate.")
+        return values
+
+    def point(x: float, y: float, relative: bool) -> Point:
+        return Point(current.x + x, current.y + y) if relative else Point(x, y)
+
+    def require_active() -> Subpath:
+        if active is None:
+            raise ParseError("An SVG path segment appears before its move command.")
+        return active
+
+    while index < len(tokens):
+        if _is_command(tokens[index]):
+            command = tokens[index]
+            index += 1
+        elif command is None:
+            raise ParseError("SVG path data must start with a command.")
+
+        assert command is not None
+        upper = command.upper()
+        relative = command.islower()
+        if upper in {"Q", "T", "A"}:
+            raise ParseError(f"Unsupported SVG path command {command!r} in CLOTHES.")
+        if upper not in {"M", "L", "H", "V", "C", "S", "Z"}:
+            raise ParseError(f"Unsupported SVG path command {command!r} in CLOTHES.")
+
+        if upper == "Z":
+            target = require_active()
+            if subpath_start is None:
+                raise ParseError("Close command has no subpath start.")
+            if current != subpath_start:
+                target.segments.append(Segment("line", current, subpath_start))
+            target.closed = True
+            current = subpath_start
+            previous_cubic_control = None
+            command = None
+            continue
+
+        if upper == "M":
+            x, y = read(2)
+            current = point(x, y, relative)
+            active = Subpath()
+            subpaths.append(active)
+            subpath_start = current
+            previous_cubic_control = None
+            # Repeated coordinate pairs after moveto are implicit lineto.
+            command = "l" if relative else "L"
+            continue
+
+        target = require_active()
+        if upper == "L":
+            x, y = read(2)
+            end = point(x, y, relative)
+            target.segments.append(Segment("line", current, end))
+            current = end
+            previous_cubic_control = None
+        elif upper == "H":
+            (x,) = read(1)
+            end = Point(current.x + x if relative else x, current.y)
+            target.segments.append(Segment("line", current, end))
+            current = end
+            previous_cubic_control = None
+        elif upper == "V":
+            (y,) = read(1)
+            end = Point(current.x, current.y + y if relative else y)
+            target.segments.append(Segment("line", current, end))
+            current = end
+            previous_cubic_control = None
+        elif upper == "C":
+            x1, y1, x2, y2, x, y = read(6)
+            control1 = point(x1, y1, relative)
+            control2 = point(x2, y2, relative)
+            end = point(x, y, relative)
+            target.segments.append(Segment("cubic", current, end, control1, control2))
+            current = end
+            previous_cubic_control = control2
+        elif upper == "S":
+            x2, y2, x, y = read(4)
+            if previous_cubic_control is None:
+                control1 = current
+            else:
+                control1 = Point(2 * current.x - previous_cubic_control.x, 2 * current.y - previous_cubic_control.y)
+            control2 = point(x2, y2, relative)
+            end = point(x, y, relative)
+            target.segments.append(Segment("cubic", current, end, control1, control2))
+            current = end
+            previous_cubic_control = control2
+
+    for subpath in subpaths:
+        if not subpath.segments:
+            raise ParseError("A path subpath in CLOTHES has no segments.")
+    return subpaths
+
+
+def _element_text(element: ET.Element) -> str:
+    return "".join(element.itertext()).strip()
+
+
+def _first_coordinate(element: ET.Element, name: str) -> float:
+    candidates = [element, *list(element.iter())[1:]]
+    for candidate in candidates:
+        value = candidate.get(name)
+        if value:
+            values = _numbers(value)
+            if values:
+                return values[0]
+    return 0.0
+
+
+def _text_position(element: ET.Element, inherited: Matrix) -> Point:
+    # Illustrator commonly stores the entire origin in a matrix on <text>.
+    own = inherited @ parse_transform(element.get("transform"))
+    x = _first_coordinate(element, "x")
+    y = _first_coordinate(element, "y")
+    return own.apply(Point(x, y))
+
+
+def _walk_layer(element: ET.Element, inherited: Matrix, paths: list[PathRecord], annotations: list[Annotation]) -> None:
+    tag = _local_name(element.tag)
+    own = inherited @ parse_transform(element.get("transform"))
+    if tag == "g":
+        for child in element:
+            _walk_layer(child, own, paths, annotations)
+        return
+    if tag == "path":
+        data = element.get("d")
+        if not data:
+            raise ParseError("A path in CLOTHES is missing its d attribute.")
+        subpaths = [subpath.transformed(own) for subpath in parse_path_data(data)]
+        paths.append(PathRecord(element.get("id"), subpaths, len(paths)))
+        return
+    if tag == "text":
+        text = _element_text(element)
+        if text:
+            annotations.append(Annotation(text, _text_position(element, inherited)))
+        return
+    if tag in {"title", "desc", "metadata"} and not _element_text(element):
+        return
+    if isinstance(element.tag, str):
+        raise ParseError(f"Unsupported SVG element <{tag}> inside CLOTHES.")
+
+
+def _distance(a: Point, b: Point) -> float:
+    return math.hypot(a.x - b.x, a.y - b.y)
+
+
+def _point_segment_distance(point: Point, start: Point, end: Point) -> float:
+    dx = end.x - start.x
+    dy = end.y - start.y
+    length_squared = dx * dx + dy * dy
+    if length_squared == 0.0:
+        return _distance(point, start)
+    t = max(0.0, min(1.0, ((point.x - start.x) * dx + (point.y - start.y) * dy) / length_squared))
+    return _distance(point, Point(start.x + t * dx, start.y + t * dy))
+
+
+def _cubic_point(start: Point, control1: Point, control2: Point, end: Point, t: float) -> Point:
+    inverse = 1.0 - t
+    return Point(
+        inverse**3 * start.x + 3 * inverse**2 * t * control1.x + 3 * inverse * t**2 * control2.x + t**3 * end.x,
+        inverse**3 * start.y + 3 * inverse**2 * t * control1.y + 3 * inverse * t**2 * control2.y + t**3 * end.y,
+    )
+
+
+def _point_to_segment_distance(point: Point, segment: Segment) -> float:
+    samples = segment.points_for_distance()
+    return min(_point_segment_distance(point, a, b) for a, b in zip(samples, samples[1:]))
+
+
+def _nearest_panel_segment(annotation: Annotation, panels: list[Panel]) -> tuple[Panel, int, Segment]:
+    candidates: list[tuple[float, Panel, int, Segment]] = []
+    for panel in panels:
+        for index, segment in enumerate(panel.segments):
+            candidates.append((_point_to_segment_distance(annotation.position, segment), panel, index, segment))
+    if not candidates:
+        raise ParseError(f"Annotation {annotation.text!r} has no panel segment to reference.")
+    candidates.sort(key=lambda item: item[0])
+    best = candidates[0]
+    if len(candidates) > 1:
+        tolerance = max(1.0e-9, best[0] * 1.0e-9)
+        if abs(candidates[1][0] - best[0]) <= tolerance:
+            raise ParseError(f"Annotation {annotation.text!r} is equally close to multiple panel segments.")
+    return best[1], best[2], best[3]
+
+
+def _unique_panel_id(preferred: str, used: set[str]) -> str:
+    candidate = preferred
+    suffix = 2
+    while candidate in used:
+        candidate = f"{preferred}_{suffix:03d}"
+        suffix += 1
+    used.add(candidate)
+    return candidate
+
+
+def _make_panels(records: list[PathRecord]) -> tuple[list[Panel], list[Subpath]]:
+    panels: list[Panel] = []
+    open_subpaths: list[Subpath] = []
+    used_ids: set[str] = set()
+    generated_index = 1
+    for record in records:
+        closed = [subpath for subpath in record.subpaths if subpath.closed]
+        open_subpaths.extend(subpath for subpath in record.subpaths if not subpath.closed)
+        for subpath_index, subpath in enumerate(closed, start=1):
+            source_id = record.source_id.strip() if record.source_id and record.source_id.strip() else None
+            if source_id:
+                preferred = source_id if len(closed) == 1 else f"{source_id}_{subpath_index:03d}"
+            else:
+                preferred = f"panel_{generated_index:03d}"
+                generated_index += 1
+            panel_id = _unique_panel_id(preferred, used_ids)
+            panels.append(Panel(panel_id, source_id, subpath.segments))
+    return panels, open_subpaths
+
+
+def _serialize_segment(segment: Segment, index: int, scale: float) -> dict[str, object]:
+    result: dict[str, object] = {
+        "index": index,
+        "type": segment.kind,
+        "start": segment.start.as_json(scale),
+        "end": segment.end.as_json(scale),
+        "sewing_group": segment.sewing_group,
+        "fold": segment.fold,
+    }
+    if segment.kind == "cubic":
+        assert segment.control1 is not None and segment.control2 is not None
+        result["control1"] = segment.control1.as_json(scale)
+        result["control2"] = segment.control2.as_json(scale)
+        # Keep geometric fields together in a predictable order.
+        result = {
+            "index": result["index"],
+            "type": result["type"],
+            "start": result["start"],
+            "control1": result["control1"],
+            "control2": result["control2"],
+            "end": result["end"],
+            "sewing_group": result["sewing_group"],
+            "fold": result["fold"],
+        }
+    return result
+
+
+def parse_svg(svg_path: str | os.PathLike[str]) -> dict[str, object]:
+    source_path = Path(svg_path).expanduser().resolve()
+    if not source_path.is_file():
+        raise ParseError(f"SVG file does not exist: {source_path}")
+    if source_path.suffix.lower() != ".svg":
+        raise ParseError("Input file must have an .svg extension.")
+    try:
+        tree = ET.parse(source_path)
+    except (ET.ParseError, OSError) as exc:
+        raise ParseError(f"Cannot read SVG: {exc}") from exc
+
+    clothes_layers = [
+        element for element in tree.getroot().iter()
+        if _local_name(element.tag) == "g" and element.get("id") == "CLOTHES"
+    ]
+    if len(clothes_layers) != 1:
+        raise ParseError(f"Expected exactly one SVG group with id='CLOTHES'; found {len(clothes_layers)}.")
+
+    # Build the transform inherited by the selected layer.
+    parent_map = {child: parent for parent in tree.iter() for child in parent}
+    ancestors: list[ET.Element] = []
+    cursor = parent_map.get(clothes_layers[0])
+    while cursor is not None:
+        ancestors.append(cursor)
+        cursor = parent_map.get(cursor)
+    inherited = Matrix()
+    for ancestor in reversed(ancestors):
+        inherited = inherited @ parse_transform(ancestor.get("transform"))
+
+    records: list[PathRecord] = []
+    annotations: list[Annotation] = []
+    _walk_layer(clothes_layers[0], inherited, records, annotations)
+    panels, open_subpaths = _make_panels(records)
+    if not panels:
+        raise ParseError("CLOTHES contains no closed pattern panel.")
+
+    scale_annotations = [annotation for annotation in annotations if _SCALE_RE.fullmatch(annotation.text)]
+    if len(scale_annotations) != 1:
+        raise ParseError(f"Expected exactly one @S<number>cm annotation; found {len(scale_annotations)}.")
+    if len(open_subpaths) != 1:
+        raise ParseError(f"Expected exactly one open scale-reference path; found {len(open_subpaths)}.")
+    scale_annotation = scale_annotations[0]
+    match = _SCALE_RE.fullmatch(scale_annotation.text)
+    assert match is not None
+    reference_centimeters = float(match.group(1))
+    if not math.isfinite(reference_centimeters) or reference_centimeters <= 0.0:
+        raise ParseError("Scale annotation length must be finite and greater than zero.")
+    reference_svg_length = sum(segment.length() for segment in open_subpaths[0].segments)
+    if not math.isfinite(reference_svg_length) or reference_svg_length <= 0.0:
+        raise ParseError("Scale-reference path must have a positive length.")
+    meters_per_svg_unit = reference_centimeters / 100.0 / reference_svg_length
+
+    data_annotations = [annotation for annotation in annotations if annotation is not scale_annotation]
+    sewing_groups: dict[str, list[dict[str, object]]] = {}
+    for annotation in data_annotations:
+        normalized = annotation.text.strip().upper()
+        panel, segment_index, segment = _nearest_panel_segment(annotation, panels)
+        if normalized == "@W":
+            segment.fold = True
+        elif _SEW_RE.fullmatch(normalized):
+            if segment.sewing_group is not None and segment.sewing_group != normalized:
+                raise ParseError(
+                    f"Panel {panel.panel_id!r} segment {segment_index} has conflicting sewing markers."
+                )
+            segment.sewing_group = normalized
+            sewing_groups.setdefault(normalized, []).append({"panel": panel.panel_id, "segment": segment_index})
+        else:
+            raise ParseError(f"Unsupported annotation {annotation.text!r} inside CLOTHES.")
+
+    document: dict[str, object] = {
+        "schema": SCHEMA_NAME,
+        "version": SCHEMA_VERSION,
+        "source": {
+            "svg_path": source_path.as_posix(),
+            "clothes_layer": "CLOTHES",
+        },
+        "units": "m",
+        "scale": {
+            "annotation": scale_annotation.text.strip(),
+            "reference_length_m": _clean_float(reference_centimeters / 100.0),
+            "reference_length_svg": _clean_float(reference_svg_length),
+            "meters_per_svg_unit": _clean_float(meters_per_svg_unit),
+        },
+        "panels": [
+            {
+                "id": panel.panel_id,
+                "source_path_id": panel.source_path_id,
+                "closed": True,
+                "segments": [
+                    _serialize_segment(segment, index, meters_per_svg_unit)
+                    for index, segment in enumerate(panel.segments)
+                ],
+            }
+            for panel in panels
+        ],
+        "sewing_groups": sewing_groups,
+    }
+    # Enforce strict JSON number validity before returning to callers.
+    json.dumps(document, allow_nan=False)
+    return document
+
+
+def write_fixed_output(document: dict[str, object], directory: str | os.PathLike[str] = ".") -> Path:
+    output_directory = Path(directory).resolve()
+    output_directory.mkdir(parents=True, exist_ok=True)
+    output_path = output_directory / OUTPUT_FILENAME
+    temporary_path = output_directory / TEMP_FILENAME
+    try:
+        with temporary_path.open("w", encoding="utf-8", newline="\n") as handle:
+            json.dump(document, handle, ensure_ascii=False, indent=2, allow_nan=False)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary_path, output_path)
+    except Exception:
+        try:
+            temporary_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise
+    return output_path
+
+
+def main(argv: Iterable[str] | None = None) -> int:
+    arguments = list(sys.argv[1:] if argv is None else argv)
+    if len(arguments) != 1:
+        print("Usage: yohsai_svg_parser.py <absolute-svg-path>", file=sys.stderr)
+        return 2
+    try:
+        document = parse_svg(arguments[0])
+        output_path = write_fixed_output(document)
+    except (ParseError, OSError, ValueError) as exc:
+        print(f"Yohsai SVG parse failed: {exc}", file=sys.stderr)
+        return 1
+    print(output_path)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

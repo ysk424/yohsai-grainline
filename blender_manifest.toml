@@ -1,23 +1,29 @@
 schema_version = "1.0.0"
 
 id = "yohsai"
-version = "0.1.0"
+version = "0.1.1"
 name = "Yohsai"
-tagline = "Yohsai clothing construction scaffold"
+tagline = "Experimental clothing construction tools"
 maintainer = "Yohsai Developers"
 type = "add-on"
 
 blender_version_min = "5.1.0"
 
-license = ["SPDX:MIT"]
+license = ["SPDX:GPL-3.0-or-later"]
 
 tags = ["Modeling", "Pipeline"]
+
+[permissions]
+files = "Load pattern SVG and write Yohsai JSON and silhouette SVG"
 
 [build]
 paths = [
     "__init__.py",
     "ui.py",
+    "mesh_loader.py",
+    "yohsai_svg_parser.py",
     "yohsai_defaults.json",
+    "SVG_TO_JSON_SPEC.md",
     "README.md",
     "DEVELOPMENT_NOTES.md",
     "LICENSE",
