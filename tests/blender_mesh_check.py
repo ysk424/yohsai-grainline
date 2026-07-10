@@ -29,58 +29,73 @@ try:
     ui._parse_process.wait(timeout=30)
     ui._poll_svg_parser()
     status = bpy.context.scene.yohsai.parse_status
-    assert status.startswith("Loaded CLOTHES_001: 2 panel(s)"), status
+    assert status.startswith("Loaded CLOTHES_001: 2 part(s)"), status
 
     collection = bpy.data.collections["CLOTHES_001"]
-    assert len(collection.objects) == 1
-    obj = collection.objects[0]
-    mesh = obj.data
-    assert obj.name == "CLOTHES_001"
-    assert obj.type == "MESH"
-    assert len(obj.modifiers) == 0
-    assert len(mesh.vertices) > 100
-    assert len(mesh.polygons) > 100
-    assert all(abs(vertex.co.y + 1.0) < 1.0e-7 for vertex in mesh.vertices)
-    assert abs(min(vertex.co.z for vertex in mesh.vertices) - 0.01) < 1.0e-6
-    min_x = min(vertex.co.x for vertex in mesh.vertices)
-    max_x = max(vertex.co.x for vertex in mesh.vertices)
+    assert bpy.context.scene.yohsai.clothes_collection == collection
+    assert len(collection.objects) == 2
+    parts = sorted(collection.objects, key=lambda item: item.name)
+    assert [obj.name for obj in parts] == ["CLOTHES_001_PART_001", "CLOTHES_001_PART_002"]
+    assert all(obj.type == "MESH" and obj.get("yohsai_role") == "part" for obj in parts)
+    assert all(len(obj.modifiers) == 0 for obj in parts)
+    assert sum(len(obj.data.vertices) for obj in parts) > 100
+    assert sum(len(obj.data.polygons) for obj in parts) > 100
+    world_vertices = [obj.matrix_world @ vertex.co for obj in parts for vertex in obj.data.vertices]
+    assert all(abs(vertex.y + 1.0) < 1.0e-7 for vertex in world_vertices)
+    assert abs(min(vertex.z for vertex in world_vertices) - 0.01) < 1.0e-6
+    min_x = min(vertex.x for vertex in world_vertices)
+    max_x = max(vertex.x for vertex in world_vertices)
     assert abs(min_x + max_x) < 1.0e-6
-    assert all(polygon.normal.y < -0.999 for polygon in mesh.polygons)
+    assert all(polygon.normal.y < -0.999 for obj in parts for polygon in obj.data.polygons)
 
-    attribute_names = set(mesh.attributes.keys())
-    assert {"sewing_A", "sewing_B", "fold", "panel_index"} <= attribute_names
-    assert sum(item.value for item in mesh.attributes["sewing_A"].data) > 0
-    assert sum(item.value for item in mesh.attributes["sewing_B"].data) > 0
-    assert sum(item.value for item in mesh.attributes["fold"].data) > 0
-    assert set(item.value for item in mesh.attributes["panel_index"].data) == {0, 1}
+    for panel_index, obj in enumerate(parts):
+        mesh = obj.data
+        attribute_names = set(mesh.attributes.keys())
+        assert {"sewing_A", "sewing_B", "fold", "panel_index"} <= attribute_names
+        assert sum(item.value for item in mesh.attributes["sewing_A"].data) > 0
+        assert sum(item.value for item in mesh.attributes["sewing_B"].data) > 0
+        assert sum(item.value for item in mesh.attributes["fold"].data) > 0
+        assert set(item.value for item in mesh.attributes["panel_index"].data) == {panel_index}
 
-    adjacency = {vertex.index: set() for vertex in mesh.vertices}
-    for edge in mesh.edges:
-        a, b = edge.vertices
-        adjacency[a].add(b)
-        adjacency[b].add(a)
-    remaining = set(adjacency)
-    component_count = 0
-    while remaining:
-        component_count += 1
-        pending = [remaining.pop()]
-        while pending:
-            for neighbor in adjacency[pending.pop()]:
-                if neighbor in remaining:
-                    remaining.remove(neighbor)
-                    pending.append(neighbor)
-    assert component_count == 2
-
-    panel_vertices: dict[int, set[int]] = {0: set(), 1: set()}
-    panel_attr = mesh.attributes["panel_index"].data
-    for polygon in mesh.polygons:
-        panel_vertices[panel_attr[polygon.index].value].update(polygon.vertices)
     bounds = []
-    for panel_index in (0, 1):
-        xs = [mesh.vertices[index].co.x for index in panel_vertices[panel_index]]
+    for obj in parts:
+        xs = [(obj.matrix_world @ vertex.co).x for vertex in obj.data.vertices]
         bounds.append((min(xs), max(xs)))
     bounds.sort()
     assert bounds[1][0] - bounds[0][1] >= 0.099
+
+    # Sewing uses the parts' current world transforms, keeps them as hidden
+    # sources, and creates loose spring edges in one combined simulation mesh.
+    parts[0].location.y += 0.03
+    sewing_result = bpy.ops.yohsai.sewing()
+    assert sewing_result == {"FINISHED"}, bpy.context.scene.yohsai.parse_status
+    sewn = bpy.data.objects["CLOTHES_001_SEWN"]
+    sewn_mesh = sewn.data
+    assert len(collection.objects) == 3
+    assert sewn.get("yohsai_role") == "sewn"
+    assert len(sewn.modifiers) == 0
+    assert all(obj.hide_get() and obj.hide_render for obj in parts)
+    assert len(sewn_mesh.polygons) == sum(len(obj.data.polygons) for obj in parts)
+    spring_attributes = [sewn_mesh.attributes[name] for name in ("sewing_spring_A", "sewing_spring_B")]
+    assert all(sum(item.value for item in attribute.data) > 0 for attribute in spring_attributes)
+    spring_edge_indices = {
+        index
+        for attribute in spring_attributes
+        for index, item in enumerate(attribute.data)
+        if item.value
+    }
+    assert spring_edge_indices
+    assert all(sewn_mesh.edges[index].is_loose for index in spring_edge_indices)
+    assert abs(min(vertex.co.y for vertex in sewn_mesh.vertices) + 1.0) < 1.0e-6
+    assert abs(max(vertex.co.y for vertex in sewn_mesh.vertices) + 0.97) < 1.0e-6
+
+    try:
+        duplicate_sewing = bpy.ops.yohsai.sewing()
+    except RuntimeError as exc:
+        assert "already has a sewn mesh" in str(exc)
+    else:
+        assert duplicate_sewing == {"CANCELLED"}
+    assert "already has a sewn mesh" in bpy.context.scene.yohsai.parse_status
 
     invalid = copy.deepcopy(ui._loaded_pattern_json)
     invalid["panels"][0]["segments"][1]["fold"] = True
@@ -92,14 +107,15 @@ try:
         raise AssertionError("A panel with multiple fold segments was accepted")
 
     # A second first-time import avoids name collisions instead of overwriting.
-    obj2 = ui.create_clothes_mesh(bpy.context, ui._loaded_pattern_json)
-    assert obj2.name == "CLOTHES_002"
-    assert "CLOTHES_002" in bpy.data.collections
+    collection2 = ui.create_clothes_mesh(bpy.context, ui._loaded_pattern_json)
+    assert collection2.name == "CLOTHES_002"
+    assert len(collection2.objects) == 2
     print(
-        "YOHSAI_MESH_OK",
-        f"verts={len(mesh.vertices)}",
-        f"faces={len(mesh.polygons)}",
-        f"fold_edges={sum(item.value for item in mesh.attributes['fold'].data)}",
+        "YOHSAI_SEWING_OK",
+        f"parts={len(parts)}",
+        f"verts={len(sewn_mesh.vertices)}",
+        f"faces={len(sewn_mesh.polygons)}",
+        f"springs={len(spring_edge_indices)}",
     )
 finally:
     yohsai.unregister()

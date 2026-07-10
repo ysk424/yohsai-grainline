@@ -14,10 +14,10 @@ from pathlib import Path
 
 import bpy
 from bpy.props import PointerProperty, StringProperty
-from bpy.types import Object, Operator, Panel, PropertyGroup
+from bpy.types import Collection, Object, Operator, Panel, PropertyGroup
 from mathutils import Vector
 
-from .mesh_loader import create_clothes_mesh
+from .mesh_loader import create_clothes_mesh, create_sewn_mesh
 
 
 _parse_process: subprocess.Popen[str] | None = None
@@ -102,10 +102,13 @@ def _poll_svg_parser() -> float | None:
         with json_path.open("r", encoding="utf-8") as handle:
             document = json.load(handle)
         validated_document = _validate_loaded_json(document, svg_path)
-        clothes_object = create_clothes_mesh(bpy.context, validated_document)
+        clothes_collection = create_clothes_mesh(bpy.context, validated_document)
+        scene = bpy.data.scenes.get(_parse_scene_name) if _parse_scene_name else None
+        if scene is not None and hasattr(scene, "yohsai"):
+            scene.yohsai.clothes_collection = clothes_collection
         _loaded_pattern_json = validated_document
         panel_count = len(validated_document["panels"])
-        _set_parse_status(f"Loaded {clothes_object.name}: {panel_count} panel(s)")
+        _set_parse_status(f"Loaded {clothes_collection.name}: {panel_count} part(s)")
     except Exception as exc:
         _set_parse_status(f"Load failed: {str(exc).strip()[:240]}")
     finally:
@@ -214,6 +217,11 @@ class YohsaiProperties(PropertyGroup):
         name="Status",
         default="Ready",
     )
+    clothes_collection: PointerProperty(
+        name="Clothes",
+        description="Loaded Yohsai clothes collection used by Sewing",
+        type=Collection,
+    )
     body_object: PointerProperty(
         name="Body",
         description="Body mesh used for silhouette projection",
@@ -311,6 +319,27 @@ class YOHSAI_OT_load_svg(Operator):
         return {"FINISHED"}
 
 
+class YOHSAI_OT_sewing(Operator):
+    bl_idname = "yohsai.sewing"
+    bl_label = "Sewing"
+    bl_description = "Combine the positioned cloth parts and create ordered loose sewing edges"
+    bl_options = {"REGISTER", "UNDO"}
+
+    def execute(self, context):
+        props = context.scene.yohsai
+        collection = props.clothes_collection
+        try:
+            sewn_object = create_sewn_mesh(context, collection)
+        except Exception as exc:
+            message = str(exc).strip() or type(exc).__name__
+            props.parse_status = f"Sewing failed: {message[:240]}"
+            self.report({"ERROR"}, message)
+            return {"CANCELLED"}
+        props.parse_status = f"Sewn {sewn_object.name}"
+        self.report({"INFO"}, f"Created {sewn_object.name}")
+        return {"FINISHED"}
+
+
 class YOHSAI_PT_main(Panel):
     bl_idname = "YOHSAI_PT_main"
     bl_label = "Yohsai"
@@ -325,6 +354,8 @@ class YOHSAI_PT_main(Panel):
         layout.separator(factor=0.4)
         layout.prop(props, "svg_path")
         layout.operator(YOHSAI_OT_load_svg.bl_idname, text="Load")
+        layout.prop(props, "clothes_collection")
+        layout.operator(YOHSAI_OT_sewing.bl_idname, text="Sewing")
         layout.label(text=props.parse_status)
         layout.separator(factor=0.8)
         layout.label(text="Silhouette Export")
@@ -333,7 +364,13 @@ class YOHSAI_PT_main(Panel):
         layout.operator(YOHSAI_OT_export_silhouette.bl_idname, text="Silhouette")
 
 
-_classes = (YohsaiProperties, YOHSAI_OT_export_silhouette, YOHSAI_OT_load_svg, YOHSAI_PT_main)
+_classes = (
+    YohsaiProperties,
+    YOHSAI_OT_export_silhouette,
+    YOHSAI_OT_load_svg,
+    YOHSAI_OT_sewing,
+    YOHSAI_PT_main,
+)
 
 
 def register():

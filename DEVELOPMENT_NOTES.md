@@ -2,7 +2,7 @@
 
 Status: public development preview.
 
-Current version: 0.1.1.
+Current version: 0.1.3.
 
 ## Version and Build Policy
 
@@ -39,13 +39,17 @@ adding sewing or fitting behavior.
 - `SVG Path` and `Load` run a standard-library-only SVG parser in a separate
   process and asynchronously load its fixed, atomically written JSON result.
 - Load expands fold-cut panels and creates one packed, cloth-ready triangular
-  Mesh object in a new numbered `CLOTHES_###` collection. Sewing and fold
-  membership are preserved as mesh attributes.
+  Mesh object per closed panel in a new numbered `CLOTHES_###` collection.
+  Sewing and fold membership are preserved as mesh attributes.
+- `Sewing` orders each marked boundary path, infers its direction from the
+  positioned world-space endpoints, and creates a combined mesh with loose
+  sewing-spring edges. The separate source parts remain hidden in the same
+  collection for future update work.
 - SVG parsing currently covers the exact `CLOTHES` layer, closed line/cubic
   paths, meter scaling through `@S<number>cm`, single-letter sewing groups, and
   `@W` fold edges. The contract is documented in `SVG_TO_JSON_SPEC.md`.
 - The panel owns a mesh body pointer, with Blender's object selector/eyedropper.
 - `Silhouette` exports XZ and YZ orthographic silhouette shadows as SVG files
   readable by Adobe Illustrator.
-- No sewing execution, Cloth modifier setup, dressing, or update/shape-transfer
+- No Cloth modifier setup, simulation, dressing, or update/shape-transfer
   behavior is implemented yet.

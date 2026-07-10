@@ -207,7 +207,9 @@ Numbers must be finite JSON numbers. The output contains no NaN or Infinity.
 The Yohsai N-panel exposes:
 
 - `SVG Path`: a file selector for an SVG document;
-- `Load`: the only user-facing action for this workflow;
+- `Load`: parse the SVG and create separate cloth-part objects;
+- `Clothes`: the loaded numbered collection used by later actions;
+- `Sewing`: build the combined sewn mesh after manual part placement;
 - a short status message.
 
 `Load` validates the path, starts the external parser, and returns control to
@@ -232,7 +234,7 @@ The welded fold remains an internal constrained edge with a `fold` attribute.
 Bezier and line boundaries are sampled at no more than approximately `0.02 m`
 between boundary vertices. The interior is filled with a near-uniform constrained
 triangular mesh at the same nominal spacing. Triangles form valid faces suitable
-for a later Cloth modifier. This step does not create loose sewing-spring edges,
+for a later Cloth modifier. `Load` does not create loose sewing-spring edges,
 perform sewing, or add a Cloth modifier.
 
 Boundary edge attributes preserve sewing membership as Boolean mesh attributes
@@ -240,9 +242,10 @@ named `sewing_<LABEL>`. Fold edges use the Boolean mesh attribute `fold`.
 
 ### 10.3 Object and collection
 
-All panels from one JSON document become disconnected face islands in one Mesh
-object. The object is placed in a newly created collection. Both use the first
-available name in the sequence `CLOTHES_001`, `CLOTHES_002`, and so on. Existing
+Each closed panel from one JSON document becomes a separate Mesh object. The
+objects are placed in one newly created collection using the first available
+name in the sequence `CLOTHES_001`, `CLOTHES_002`, and so on. Part objects are
+named `<collection>_PART_001`, `<collection>_PART_002`, and so on. Existing
 Yohsai collections are never overwritten by `Load`.
 
 ### 10.4 Initial placement
@@ -264,7 +267,39 @@ dressed garment is a separate future workflow because it must define panel
 identity, topology changes, deformation transfer, sewing preservation, modifier
 preservation, and panel-count changes.
 
-## 11. Future compatibility
+## 11. Sewing
+
+The user positions and rotates the separate part objects before pressing
+`Sewing`. Object world transforms at that moment are applied to the generated
+sewn mesh.
+
+For every sewing label, the marked boundary edges are split into connected,
+non-branching paths and ordered by mesh topology. A label must occur on exactly
+two different part objects. Sewing a part to itself, a missing partner, a label
+on more than two parts, a branched or closed sewing path, or unequal numbers of
+continuous paths is an error.
+
+When a label has multiple paths, Yohsai chooses the one-to-one path assignment
+with the smallest total world-space endpoint distance. For each path pair it
+compares the two possible directions and uses the direction with the smaller
+endpoint-distance sum. A tied or otherwise ambiguous result is an error and the
+user must move the intended seams closer together.
+
+Vertices are matched monotonically by normalized distance along each ordered
+path. This preserves ordering even when the two paths contain different vertex
+counts. The resulting connections are edges that belong to no face, as required
+for Blender Cloth sewing springs. They receive Boolean edge attributes named
+`sewing_spring_<LABEL>`. The original marked boundaries retain
+`sewing_<LABEL>`.
+
+Blender Cloth sewing springs operate within one Mesh object. `Sewing` therefore
+creates `<collection>_SEWN`, containing all positioned parts as disconnected
+face islands plus the loose sewing edges. The original separate part objects are
+kept in the same collection but hidden in the viewport and render. No Cloth
+modifier is added in this step. Repeating `Sewing` for a collection that already
+contains a sewn mesh is an error.
+
+## 12. Future compatibility
 
 Future versions may add darts, notches, grain lines, seam order and direction,
 additional SVG primitives, error-checker interoperability, and Blender geometry
