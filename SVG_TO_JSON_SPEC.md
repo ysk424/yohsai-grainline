@@ -373,11 +373,12 @@ changed in the pattern and loaded as a new clothes collection. The Body is
 constant after its first evaluated snapshot. Runtime velocity is not persisted
 across reopening a Blender file.
 
-Version 0.1.11 temporarily exposes gravity and seam closure in the N-panel; their
-current values are read on every click without reconstructing the session.
+Version 0.1.12 uses the tested gravity and seam-closure defaults internally.
+They are solver constants rather than pattern data and do not alter the JSON
+contract.
 
 Taichi selects an available GPU architecture automatically and uses an explicit
-CPU fallback when GPU initialization fails. The 0.1.11 package supplies Windows
+CPU fallback when GPU initialization fails. The 0.1.12 package supplies Windows
 x64 CPython 3.13 wheels.
 
 ## 13. Update

@@ -2,7 +2,7 @@
 
 Status: public development preview.
 
-Current version: 0.1.11.
+Current version: 0.1.12.
 
 The authoritative Kitsuke design, tuning log, known limitations, and resume
 checklist are maintained in `KITSUKE_DESIGN.md`.
@@ -25,7 +25,7 @@ when a new build is produced. Amend or supersede them explicitly instead of
 silently removing the current record.
 
 This repository is public-facing but still under active development. Interfaces,
-data formats, silhouette output details, and packaging may change before a stable
+data formats, utility output details, and packaging may change before a stable
 release.
 
 ## Direction
@@ -45,6 +45,8 @@ adding sewing or fitting behavior.
 ## Current State
 
 - The add-on registers a `Yohsai` N-panel in the 3D View sidebar.
+- The N-panel groups Pattern Path, Clothes, and Body at the top, followed only
+  by the four primary actions: Load, Update, Sewing, and Kitsuke.
 - `Pattern Path` and `Load` accept PDF or SVG, run the parser in a separate
   process, and asynchronously load its fixed, atomically written JSON result.
   PDF is the preferred Illustrator interchange and uses bundled `pypdf` and
@@ -76,8 +78,8 @@ adding sewing or fitting behavior.
   0.18 to 0.08, and maximum velocity is 1.0 m/s. Body contact uses one nearest triangle
   per cloth vertex, collision corrections are averaged, and unstable steps are
   rolled back before Blender mesh data is changed.
-  Gravity and seam closure are temporarily exposed in the N-panel for repeated
-  empirical tuning and are read again on every click.
+  Gravity and seam closure use the tested fixed defaults and are intentionally
+  absent from the production N-panel.
 - PDF parsing reads closed line/cubic paths containing unique `#` labels and
   ignores unrelated unlabeled artwork. PDF page points supply physical scale;
   `@S<number>cm` remains required as pattern metadata. SVG parsing covers the
@@ -85,7 +87,8 @@ adding sewing or fitting behavior.
   paths, meter scaling through `@S<number>cm`, single-letter sewing groups, and
   `@W` fold edges. The contract is documented in `SVG_TO_JSON_SPEC.md`.
 - The panel owns a mesh body pointer, with Blender's object selector/eyedropper.
-- `Silhouette` exports XZ and YZ orthographic silhouette shadows as SVG files
-  readable by Adobe Illustrator.
+- `UTIL/silhouette_export.py` is a standalone `bpy` preparation script for the
+  Scripting workspace. It exports XZ and YZ orthographic silhouette SVGs and is
+  normally run once per character; it is not registered as an add-on operator.
 - No Blender Cloth modifier is used. Kitsuke sessions are intentionally
   in-memory; reopening a partially dressed file restarts with zero velocity.

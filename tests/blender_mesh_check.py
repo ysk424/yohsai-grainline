@@ -151,14 +151,8 @@ try:
     parts[0].rotation_euler.z += 0.02
     second_kitsuke = bpy.ops.yohsai.kitsuke()
     assert second_kitsuke == {"FINISHED"}, bpy.context.scene.yohsai.parse_status
-    bpy.context.scene.yohsai.kitsuke_gravity = 0.5
-    bpy.context.scene.yohsai.kitsuke_seam_pull_mm = 5.0
-    tuned_kitsuke = bpy.ops.yohsai.kitsuke()
-    assert tuned_kitsuke == {"FINISHED"}, bpy.context.scene.yohsai.parse_status
-    assert "gravity 0.5" in bpy.context.scene.yohsai.parse_status
-    assert "seam 5 mm" in bpy.context.scene.yohsai.parse_status
-    bpy.context.scene.yohsai.kitsuke_gravity = kitsuke_module.DEFAULT_GRAVITY_M_PER_SECOND_SQUARED
-    bpy.context.scene.yohsai.kitsuke_seam_pull_mm = kitsuke_module.DEFAULT_SEAM_CLOSURE_PER_CLICK_M * 1000.0
+    assert not hasattr(bpy.context.scene.yohsai, "kitsuke_gravity")
+    assert not hasattr(bpy.context.scene.yohsai, "kitsuke_seam_pull_mm")
     for _step in range(8):
         repeated_kitsuke = bpy.ops.yohsai.kitsuke()
         assert repeated_kitsuke == {"FINISHED"}, bpy.context.scene.yohsai.parse_status

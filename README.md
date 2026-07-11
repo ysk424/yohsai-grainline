@@ -1,4 +1,4 @@
-# Yohsai 0.1.11
+# Yohsai 0.1.12
 
 Yohsai is a public, in-development Blender extension for clothing construction.
 The API, data shape, and generated output are still experimental.
@@ -10,21 +10,31 @@ The planned direction is:
 - Seam construction and stitching.
 - Dressing the generated garment onto a character.
 
-This first repository state provides a loadable Blender extension shell, an
-N-panel, body selection, and silhouette export.
+The normal Yohsai workflow is intentionally concentrated into four operations:
+`Load`, `Update`, `Sewing`, and `Kitsuke`.
 
-## Silhouette Export
+## N-panel workflow
 
-In the 3D View sidebar, open `Yohsai`, pick a mesh body in the `Body` field
-using the object selector or eyedropper, set `Output`, then press `Silhouette`.
+The top of the Yohsai N-panel contains all three inputs:
 
-The exporter writes two Adobe Illustrator-readable SVG files:
+- `Pattern Path`: the current Illustrator PDF or SVG;
+- `Clothes`: the loaded Yohsai clothes collection;
+- `Body`: the fixed collision mesh used by Kitsuke.
 
-- `<Body>_shadow_xz.svg`
-- `<Body>_shadow_yz.svg`
+Below them are `Load`, `Update`, `Sewing`, and `Kitsuke`, in workflow order.
+Gravity and seam pull use the tested Yohsai defaults and are no longer exposed
+as N-panel debugging controls.
+
+## Silhouette preparation utility
+
+Silhouette export is character preparation, normally run only once per
+character, so it is not part of the Yohsai N-panel. Select the character mesh
+and run `UTIL/silhouette_export.py` from Blender's Scripting workspace. It
+writes `<Body>_shadow_xz.svg` and `<Body>_shadow_yz.svg` for Illustrator.
 
 SVG dimensions are written in millimeters. Yohsai converts Blender world units
 through the scene unit scale, so the path keeps real size for pattern drafting.
+Complete instructions are in `UTIL/README.md`.
 
 ## Pattern PDF / SVG Load
 
@@ -77,10 +87,6 @@ restores every pattern panel as a separate object. Move and rotate any one or
 more panels in Object Mode, press `Kitsuke` again, and repeat while the seams
 close and the garment approaches the body.
 
-Version 0.1.11 temporarily exposes `Gravity` in m/s² and `Seam Pull` in
-mm/click in the N-panel for empirical tuning. Changes take effect on the next
-Kitsuke click without rebuilding the session.
-
 The pattern topology and its original edge lengths remain authoritative.
 Scaling or changing topology during Kitsuke is rejected. Moving or rotating a
 part clears that part's velocity; untouched parts retain theirs. The Body is
@@ -88,7 +94,7 @@ evaluated once on the first step and remains a fixed collider. Body/cloth and
 cloth/cloth contact thickness is 2 mm, while paired seam points target 0 mm.
 
 Taichi chooses an available GPU backend automatically and falls back to the CPU
-only when no GPU backend initializes. Version 0.1.11 bundles the CPython 3.13
+only when no GPU backend initializes. Version 0.1.12 bundles the CPython 3.13
 Windows x64 wheels and is packaged for Windows x64.
 
 The input and JSON contracts are documented in `SVG_TO_JSON_SPEC.md`.
@@ -112,6 +118,8 @@ The extension manifest is `blender_manifest.toml`. The source package contains:
 - `DESIGN_PHILOSOPHY.md`
 - `README.md`
 - `DEVELOPMENT_NOTES.md`
+- `UTIL/silhouette_export.py`
+- `UTIL/README.md`
 - `LICENSE`
 
 ## License

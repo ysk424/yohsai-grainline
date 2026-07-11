@@ -8,14 +8,11 @@ import os
 import subprocess
 import sys
 import tomllib
-from collections import defaultdict
-from html import escape
 from pathlib import Path
 
 import bpy
-from bpy.props import FloatProperty, PointerProperty, StringProperty
+from bpy.props import PointerProperty, StringProperty
 from bpy.types import Collection, Object, Operator, Panel, PropertyGroup
-from mathutils import Vector
 
 from .kitsuke import (
     DEFAULT_GRAVITY_M_PER_SECOND_SQUARED,
@@ -46,12 +43,6 @@ def _version() -> str:
             return str(tomllib.load(f).get("version", "?"))
     except Exception:
         return "?"
-
-
-def _default_output_dir() -> str:
-    if bpy.data.filepath:
-        return os.path.dirname(bpy.data.filepath)
-    return os.path.expanduser("~")
 
 
 def _mesh_object_poll(_properties, obj: Object) -> bool:
@@ -156,94 +147,6 @@ def _poll_svg_parser() -> float | None:
     return None
 
 
-def _projection_data(obj: Object, axis: str) -> tuple[list[tuple[float, float, float, float]], tuple[float, float, float, float]]:
-    depsgraph = bpy.context.evaluated_depsgraph_get()
-    eval_obj = obj.evaluated_get(depsgraph)
-    mesh = eval_obj.to_mesh()
-    try:
-        mesh.calc_loop_triangles()
-        matrix = eval_obj.matrix_world
-        normal_matrix = matrix.to_3x3().inverted().transposed()
-        view_dir = Vector((0.0, 1.0, 0.0)) if axis == "Y" else Vector((1.0, 0.0, 0.0))
-
-        edge_faces: dict[tuple[int, int], list[float]] = defaultdict(list)
-        world_vertices = [matrix @ vertex.co for vertex in mesh.vertices]
-
-        for poly in mesh.polygons:
-            normal = (normal_matrix @ poly.normal).normalized()
-            facing = normal.dot(view_dir)
-            for edge_key in poly.edge_keys:
-                edge_faces[tuple(sorted(edge_key))].append(facing)
-
-        segments: list[tuple[float, float, float, float]] = []
-        points: list[tuple[float, float]] = []
-        for edge_key, facings in edge_faces.items():
-            if len(facings) == 1:
-                is_silhouette = True
-            else:
-                is_silhouette = min(facings) <= 0.0 <= max(facings)
-            if not is_silhouette:
-                continue
-
-            a = world_vertices[edge_key[0]]
-            b = world_vertices[edge_key[1]]
-            if axis == "Y":
-                segment = (a.x, a.z, b.x, b.z)
-            else:
-                segment = (a.y, a.z, b.y, b.z)
-            segments.append(segment)
-            points.extend(((segment[0], segment[1]), (segment[2], segment[3])))
-
-        if not points:
-            raise ValueError("No silhouette edges were found.")
-
-        xs = [point[0] for point in points]
-        ys = [point[1] for point in points]
-        return segments, (min(xs), min(ys), max(xs), max(ys))
-    finally:
-        eval_obj.to_mesh_clear()
-
-
-def _mm_per_blender_unit(context) -> float:
-    return max(context.scene.unit_settings.scale_length, 0.000001) * 1000.0
-
-
-def _svg_path_data(segments: list[tuple[float, float, float, float]], min_x: float, max_y: float, mm_per_unit: float) -> str:
-    commands = []
-    for x1, y1, x2, y2 in segments:
-        sx1 = (x1 - min_x) * mm_per_unit
-        sy1 = (max_y - y1) * mm_per_unit
-        sx2 = (x2 - min_x) * mm_per_unit
-        sy2 = (max_y - y2) * mm_per_unit
-        commands.append(f"M {sx1:.3f} {sy1:.3f} L {sx2:.3f} {sy2:.3f}")
-    return " ".join(commands)
-
-
-def _write_silhouette_svg(context, obj: Object, axis: str, filepath: str) -> None:
-    segments, bounds = _projection_data(obj, axis)
-    min_x, min_y, max_x, max_y = bounds
-    width = max(max_x - min_x, 0.001)
-    height = max(max_y - min_y, 0.001)
-    mm_per_unit = _mm_per_blender_unit(context)
-    padding = 10.0
-    svg_width = width * mm_per_unit + padding * 2.0
-    svg_height = height * mm_per_unit + padding * 2.0
-    view_box = f"0 0 {svg_width:.3f} {svg_height:.3f}"
-    path_data = _svg_path_data(segments, min_x, max_y, mm_per_unit)
-    label = "XZ shadow" if axis == "Y" else "YZ shadow"
-
-    content = f"""<?xml version="1.0" encoding="UTF-8"?>
-<svg xmlns="http://www.w3.org/2000/svg" version="1.1" width="{svg_width:.3f}mm" height="{svg_height:.3f}mm" viewBox="{view_box}">
-  <title>{escape(obj.name)} {label}</title>
-  <g id="{escape(obj.name)}-{axis}-silhouette" transform="translate({padding:.3f} {padding:.3f})">
-    <path d="{path_data}" fill="none" stroke="#000000" stroke-width="0.25" stroke-linecap="round" stroke-linejoin="round"/>
-  </g>
-</svg>
-"""
-    with open(filepath, "w", encoding="utf-8", newline="\n") as f:
-        f.write(content)
-
-
 class YohsaiProperties(PropertyGroup):
     svg_path: StringProperty(
         name="Pattern Path",
@@ -262,68 +165,10 @@ class YohsaiProperties(PropertyGroup):
     )
     body_object: PointerProperty(
         name="Body",
-        description="Fixed body mesh used for Kitsuke collision and silhouette projection",
+        description="Fixed body mesh used for Kitsuke collision",
         type=Object,
         poll=_mesh_object_poll,
     )
-    kitsuke_gravity: FloatProperty(
-        name="Gravity",
-        description="Downward acceleration used by each Kitsuke step",
-        default=DEFAULT_GRAVITY_M_PER_SECOND_SQUARED,
-        min=0.0,
-        soft_max=9.81,
-        max=100.0,
-        precision=3,
-        unit="ACCELERATION",
-    )
-    kitsuke_seam_pull_mm: FloatProperty(
-        name="Seam Pull",
-        description="Distance removed from every transient seam target per Kitsuke click",
-        default=DEFAULT_SEAM_CLOSURE_PER_CLICK_M * 1000.0,
-        min=0.0,
-        soft_max=30.0,
-        max=1000.0,
-        precision=2,
-    )
-    output_dir: StringProperty(
-        name="Output",
-        description="Folder for Illustrator-readable silhouette SVG files",
-        subtype="DIR_PATH",
-        default="",
-    )
-
-
-class YOHSAI_OT_export_silhouette(Operator):
-    bl_idname = "yohsai.export_silhouette"
-    bl_label = "Silhouette"
-    bl_description = "Export XZ and YZ body shadows as SVG files readable by Adobe Illustrator"
-    bl_options = {"REGISTER"}
-
-    def execute(self, context):
-        props = context.scene.yohsai
-        obj = props.body_object
-        if obj is None:
-            self.report({"ERROR"}, "Select a body object first.")
-            return {"CANCELLED"}
-        if obj.type != "MESH":
-            self.report({"ERROR"}, "Body must be a mesh object.")
-            return {"CANCELLED"}
-
-        output_dir = bpy.path.abspath(props.output_dir) if props.output_dir else _default_output_dir()
-        os.makedirs(output_dir, exist_ok=True)
-        safe_name = bpy.path.clean_name(obj.name)
-        xz_path = os.path.join(output_dir, f"{safe_name}_shadow_xz.svg")
-        yz_path = os.path.join(output_dir, f"{safe_name}_shadow_yz.svg")
-
-        try:
-            _write_silhouette_svg(context, obj, "Y", xz_path)
-            _write_silhouette_svg(context, obj, "X", yz_path)
-        except Exception as exc:
-            self.report({"ERROR"}, f"Silhouette export failed: {exc}")
-            return {"CANCELLED"}
-
-        self.report({"INFO"}, f"Exported {os.path.basename(xz_path)} and {os.path.basename(yz_path)}")
-        return {"FINISHED"}
 
 
 class YOHSAI_OT_load_svg(Operator):
@@ -480,8 +325,8 @@ class YOHSAI_OT_kitsuke(Operator):
                 context,
                 props.clothes_collection,
                 props.body_object,
-                props.kitsuke_gravity,
-                props.kitsuke_seam_pull_mm / 1000.0,
+                DEFAULT_GRAVITY_M_PER_SECOND_SQUARED,
+                DEFAULT_SEAM_CLOSURE_PER_CLICK_M,
             )
         except KitsukeError as exc:
             message = str(exc).strip() or type(exc).__name__
@@ -510,27 +355,22 @@ class YOHSAI_PT_main(Panel):
         props = context.scene.yohsai
         layout.label(text=f"Yohsai v{_version()}")
         layout.separator(factor=0.4)
-        layout.prop(props, "svg_path")
-        layout.operator(YOHSAI_OT_load_svg.bl_idname, text="Load")
-        layout.prop(props, "clothes_collection")
-        layout.operator(YOHSAI_OT_update_svg.bl_idname, text="Update")
-        layout.operator(YOHSAI_OT_sewing.bl_idname, text="Sewing")
-        layout.prop(props, "body_object")
-        tuning = layout.box()
-        tuning.label(text="Kitsuke Tuning (Temporary)")
-        tuning.prop(props, "kitsuke_gravity")
-        tuning.prop(props, "kitsuke_seam_pull_mm", text="Seam Pull (mm/click)")
-        layout.operator(YOHSAI_OT_kitsuke.bl_idname, text="Kitsuke")
+        inputs = layout.column(align=True)
+        inputs.label(text="Inputs")
+        inputs.prop(props, "svg_path")
+        inputs.prop(props, "clothes_collection")
+        inputs.prop(props, "body_object")
+        layout.separator(factor=0.4)
+        actions = layout.column(align=True)
+        actions.operator(YOHSAI_OT_load_svg.bl_idname, text="Load")
+        actions.operator(YOHSAI_OT_update_svg.bl_idname, text="Update")
+        actions.operator(YOHSAI_OT_sewing.bl_idname, text="Sewing")
+        actions.operator(YOHSAI_OT_kitsuke.bl_idname, text="Kitsuke")
         layout.label(text=props.parse_status)
-        layout.separator(factor=0.8)
-        layout.label(text="Silhouette Export")
-        layout.prop(props, "output_dir")
-        layout.operator(YOHSAI_OT_export_silhouette.bl_idname, text="Silhouette")
 
 
 _classes = (
     YohsaiProperties,
-    YOHSAI_OT_export_silhouette,
     YOHSAI_OT_load_svg,
     YOHSAI_OT_update_svg,
     YOHSAI_OT_sewing,

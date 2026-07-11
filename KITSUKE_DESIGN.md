@@ -2,7 +2,7 @@
 
 Status: active implementation and empirical tuning  
 Recorded: 2026-07-11 (Asia/Tokyo)  
-Current tested package: Yohsai 0.1.11, Windows x64, Blender 5.2 / Python 3.13,
+Current tested package: Yohsai 0.1.12, Windows x64, Blender 5.2 / Python 3.13,
 Taichi 1.7.4
 
 ## 1. Product idea
@@ -113,16 +113,16 @@ The solver rolls back without writing Blender mesh data if positions or
 velocities become non-finite, or if any vertex moves more than 0.1 m in one
 click. The error reports the measured maximum displacement.
 
-## 7. Temporary N-panel tuning controls
+## 7. Former temporary N-panel tuning controls
 
-Yohsai 0.1.9 temporarily exposes:
+Yohsai 0.1.9 temporarily exposed:
 
 - `Gravity` in m/s², default 1.0;
 - `Seam Pull (mm/click)`, default 30.
 
-Both values are read on every click. They can be changed during one active
-Kitsuke session without reloading or rebuilding sewing state. They deliberately
-control user-visible rates rather than exposing low-level PBD stiffness.
+From 0.1.12, these controls are removed from the production N-panel and their
+tested values are fixed defaults. The tuning history below is retained as an
+engineering record, not as a current user workflow.
 
 Recommended tuning method:
 
@@ -215,7 +215,7 @@ fast-moving regions such as the shoulder, breast, and abdomen.
 - Friction is not yet modeled.
 - Panel mass and textile-specific stretch/bend parameters are not exposed.
 - Runtime state is not serialized.
-- The bundled 0.1.11 distribution is Windows x64 / CPython 3.13.
+- The bundled 0.1.12 distribution is Windows x64 / CPython 3.13.
 - Taichi wheels make the extension archive approximately 85 MB.
 
 XPBD is a likely later improvement because compliance reduces dependence on
@@ -226,7 +226,7 @@ current interaction model rather than block tuning of the central workflow.
 
 When work resumes:
 
-1. Use `dist/yohsai-0.1.11.zip` unless a newer build exists.
+1. Use `dist/yohsai-0.1.12.zip` unless a newer build exists.
 2. Fully close Blender and Blender MCP before replacing the extension, because
    the loaded Taichi native library may lock its wheel files on Windows.
 3. Start a new Load/Sewing session after an extension restart.

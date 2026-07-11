@@ -183,6 +183,12 @@ internal lines, stay tape, and other garment-making concepts. These features
 must be added as pattern concepts rather than borrowed uncritically from a 3D
 tool taxonomy.
 
+The Blender interface follows the same restraint. The normal N-panel groups its
+few inputs first and presents the construction sequence as `Load`, `Update`,
+`Sewing`, and `Kitsuke`. One-time character preparation and engineering tuning
+do not belong among those daily actions. Occasional preparation such as
+silhouette export lives in documented Scripting utilities instead.
+
 ## 10. V2 automatic operator
 
 The long-term V2.0.0 concept replaces or assists the human placement operator
