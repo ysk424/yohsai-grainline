@@ -14,6 +14,7 @@ MINIMAL_SVG = """<?xml version="1.0" encoding="UTF-8"?>
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 300 200">
   <g id="CLOTHES">
     <path id="front" d="M 100 100 L 200 100 C 210 100 210 150 200 150 L 100 150 Z"/>
+    <text x="150" y="125"># Front_01 </text>
     <text transform="matrix(1 0 0 1 150 95)">A</text>
     <text transform="matrix(1 0 0 1 95 125)">@W</text>
     <text x="50" y="25">@s100cm</text>
@@ -36,7 +37,8 @@ class SvgParserTests(unittest.TestCase):
         self.assertEqual(document["units"], "m")
         self.assertAlmostEqual(document["scale"]["meters_per_svg_unit"], 0.01)
         self.assertEqual(len(document["panels"]), 1)
-        self.assertEqual(document["panels"][0]["id"], "front")
+        self.assertEqual(document["panels"][0]["id"], "FRONT_01")
+        self.assertEqual(document["panels"][0]["label"], "FRONT_01")
         self.assertIn("cubic", [segment["type"] for segment in document["panels"][0]["segments"]])
         self.assertEqual(len(document["sewing_groups"]["A"]), 1)
         self.assertEqual(sum(segment["fold"] for segment in document["panels"][0]["segments"]), 1)
@@ -54,6 +56,19 @@ class SvgParserTests(unittest.TestCase):
     def test_missing_clothes_layer_is_an_error(self) -> None:
         with self.assertRaisesRegex(parser.ParseError, "id='CLOTHES'"):
             self._parse_text(MINIMAL_SVG.replace('id="CLOTHES"', 'id="CLITHES"'))
+
+    def test_panel_labels_are_strict_unique_and_inside(self) -> None:
+        with self.assertRaisesRegex(parser.ParseError, "inside exactly one"):
+            self._parse_text(MINIMAL_SVG.replace('x="150" y="125"', 'x="250" y="125"'))
+        duplicate = MINIMAL_SVG.replace(
+            '<text x="150" y="125"># Front_01 </text>',
+            '<text x="150" y="125"># Front_01 </text><text x="160" y="130">#front_01</text>',
+        )
+        with self.assertRaisesRegex(parser.ParseError, "more than one|Duplicate"):
+            self._parse_text(duplicate)
+        invalid = MINIMAL_SVG.replace("# Front_01 ", "#FRONT.01")
+        with self.assertRaisesRegex(parser.ParseError, "Invalid panel label"):
+            self._parse_text(invalid)
 
     def test_supplied_test2(self) -> None:
         source = Path.home() / "Desktop" / "test2.svg"

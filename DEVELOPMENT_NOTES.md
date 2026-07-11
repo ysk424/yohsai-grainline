@@ -2,10 +2,12 @@
 
 Status: public development preview.
 
-Current version: 0.1.9.
+Current version: 0.1.10.
 
 The authoritative Kitsuke design, tuning log, known limitations, and resume
 checklist are maintained in `KITSUKE_DESIGN.md`.
+The product-level pattern-designer perspective and anti-drift rules are
+authoritative in `DESIGN_PHILOSOPHY.md`.
 
 The first real-character 0.1.9 trial produces a recognizable fitted dress from
 the incremental workflow. Remaining visible holes at the shoulder, chest, and
@@ -48,6 +50,16 @@ adding sewing or fitting behavior.
 - Load expands fold-cut panels and creates one packed, cloth-ready triangular
   Mesh object per closed panel in a new numbered `CLOTHES_###` collection.
   Sewing and fold membership are preserved as mesh attributes.
+- `#` text inside a panel provides a normalized, human-authored identity for
+  Update. Whitespace is removed; ASCII letters compare case-insensitively; and
+  digits, underscore, and hyphen are accepted.
+- `Update` asynchronously rereads the same SVG, recuts all labeled panels,
+  transfers the current 3D pose through stored flat-pattern coordinates, and
+  atomically swaps new Mesh datablocks into the existing objects. New pattern
+  geometry owns rest lengths and velocities reset to zero.
+- Unchanged sewing signatures remain verified across Update. Changed sewing
+  membership invalidates verification, and Kitsuke reports `Sewing required`
+  until the independent Sewing operation succeeds again.
 - `Sewing` orders each marked boundary path, infers its direction from the
   positioned world-space endpoints, and creates a combined mesh with loose
   sewing-spring edges. The separate source parts remain hidden in the same

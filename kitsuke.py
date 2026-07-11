@@ -8,6 +8,8 @@ import numpy as np
 from mathutils import Matrix, Vector
 from mathutils.bvhtree import BVHTree
 
+from .mesh_loader import SewingError, build_sewing_plan
+
 
 TIME_STEP = 1.0 / 240.0
 STEPS_PER_CLICK = 16
@@ -78,7 +80,14 @@ def _world_vertices(obj: bpy.types.Object) -> np.ndarray:
     return np.asarray([tuple(matrix @ vertex.co) for vertex in obj.data.vertices], dtype=np.float32)
 
 
-def _edge_constraints(parts: list[_PartRange], positions: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+def _pattern_rest_vertices(obj: bpy.types.Object) -> np.ndarray:
+    attribute = obj.data.attributes.get("yohsai_pattern_position")
+    if attribute is None or attribute.domain != "POINT" or len(attribute.data) != len(obj.data.vertices):
+        raise KitsukeError(f"{obj.name} has no authoritative flat-pattern coordinates. Load the pattern again.")
+    return np.asarray([(item.vector[0], 0.0, item.vector[1]) for item in attribute.data], dtype=np.float32)
+
+
+def _edge_constraints(parts: list[_PartRange], rest_positions: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     edges: list[tuple[int, int]] = []
     for part in parts:
         edges.extend(
@@ -86,11 +95,11 @@ def _edge_constraints(parts: list[_PartRange], positions: np.ndarray) -> tuple[n
             for edge in part.obj.data.edges
         )
     indices = np.asarray(edges, dtype=np.int32).reshape((-1, 2))
-    rest = np.linalg.norm(positions[indices[:, 0]] - positions[indices[:, 1]], axis=1).astype(np.float32)
+    rest = np.linalg.norm(rest_positions[indices[:, 0]] - rest_positions[indices[:, 1]], axis=1).astype(np.float32)
     return indices, rest
 
 
-def _bending_constraints(parts: list[_PartRange], positions: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+def _bending_constraints(parts: list[_PartRange], rest_positions: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     pairs: list[tuple[int, int]] = []
     for part in parts:
         mesh = part.obj.data
@@ -106,7 +115,7 @@ def _bending_constraints(parts: list[_PartRange], positions: np.ndarray) -> tupl
     indices = np.asarray(pairs, dtype=np.int32).reshape((-1, 2))
     if not len(indices):
         return indices, np.empty(0, dtype=np.float32)
-    rest = np.linalg.norm(positions[indices[:, 0]] - positions[indices[:, 1]], axis=1).astype(np.float32)
+    rest = np.linalg.norm(rest_positions[indices[:, 0]] - rest_positions[indices[:, 1]], axis=1).astype(np.float32)
     return indices, rest
 
 
@@ -129,6 +138,19 @@ def _seam_constraints(preview: bpy.types.Object, part_ranges: list[_PartRange]) 
         [preview.data.edges[index].vertices[:] for index in sorted(spring_edges)],
         dtype=np.int32,
     ).reshape((-1, 2))
+
+
+def _seam_constraints_from_parts(collection: bpy.types.Collection, part_ranges: list[_PartRange]) -> np.ndarray:
+    if not bool(collection.get("yohsai_sewing_verified", False)):
+        raise KitsukeError("Sewing required: verify the current pattern connectivity before Kitsuke.")
+    try:
+        plan = build_sewing_plan(collection)
+    except SewingError as exc:
+        raise KitsukeError(f"Sewing required: {exc}") from exc
+    expected = [part.obj.name for part in part_ranges]
+    if [part.name for part in plan.parts] != expected:
+        raise KitsukeError("Sewing required: the verified panel set no longer matches the current objects.")
+    return np.asarray([(a, b) for _label, a, b in plan.connections], dtype=np.int32).reshape((-1, 2))
 
 
 def _body_snapshot(context, body: bpy.types.Object) -> _BodySnapshot:
@@ -533,10 +555,9 @@ class _KitsukeSession:
         objects = _parts(collection)
         if len(objects) < 2:
             raise KitsukeError("Kitsuke needs at least two cloth objects.")
-        if preview is None:
-            raise KitsukeError("Press Sewing and verify its preview before the first Kitsuke step.")
         ranges: list[_PartRange] = []
         position_blocks: list[np.ndarray] = []
+        rest_blocks: list[np.ndarray] = []
         faces: list[tuple[int, int, int]] = []
         offset = 0
         for obj in objects:
@@ -545,16 +566,22 @@ class _KitsukeSession:
             block = _world_vertices(obj)
             ranges.append(_PartRange(obj, offset, len(block)))
             position_blocks.append(block)
+            rest_blocks.append(_pattern_rest_vertices(obj))
             faces.extend(_triangles(obj.data, offset))
             offset += len(block)
         self.collection = collection
         self.parts = ranges
         self.positions = np.concatenate(position_blocks).astype(np.float32)
+        rest_positions = np.concatenate(rest_blocks).astype(np.float32)
         self.velocities = np.zeros_like(self.positions)
         self.faces = np.asarray(faces, dtype=np.int32).reshape((-1, 3))
-        self.edges, self.edge_rest = _edge_constraints(ranges, self.positions)
-        self.bends, self.bend_rest = _bending_constraints(ranges, self.positions)
-        self.seams = _seam_constraints(preview, ranges)
+        self.edges, self.edge_rest = _edge_constraints(ranges, rest_positions)
+        self.bends, self.bend_rest = _bending_constraints(ranges, rest_positions)
+        self.seams = (
+            _seam_constraints(preview, ranges)
+            if preview is not None
+            else _seam_constraints_from_parts(collection, ranges)
+        )
         self.body = _body_snapshot(context, body)
         self.body_pointer = body.as_pointer()
         self.matrices = {part.obj.name: _matrix_tuple(part.obj.matrix_world) for part in ranges}
@@ -690,6 +717,11 @@ def advance_kitsuke(
 
 def clear_sessions() -> None:
     _sessions.clear()
+
+
+def clear_kitsuke_session(collection: bpy.types.Collection | None) -> None:
+    if collection is not None:
+        _sessions.pop(collection.as_pointer(), None)
 
 
 def has_kitsuke_session(collection: bpy.types.Collection | None) -> bool:

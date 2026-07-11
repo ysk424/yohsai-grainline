@@ -4,13 +4,15 @@
 from __future__ import annotations
 
 import math
+import json
 from dataclasses import dataclass
 from itertools import permutations
 from typing import Any, Iterable
 
 import bpy
 from mathutils import Vector
-from mathutils.geometry import delaunay_2d_cdt
+from mathutils.bvhtree import BVHTree
+from mathutils.geometry import barycentric_transform, delaunay_2d_cdt
 
 
 MESH_SPACING_M = 0.01
@@ -28,6 +30,10 @@ class SewingError(ValueError):
     """Loaded pattern parts cannot be converted into an unambiguous sewn mesh."""
 
 
+class UpdateError(ValueError):
+    """A revised pattern cannot atomically replace the current panel meshes."""
+
+
 @dataclass(frozen=True)
 class EdgeMeta:
     sewing_group: str | None = None
@@ -37,7 +43,9 @@ class EdgeMeta:
 @dataclass
 class PanelGeometry:
     panel_id: str
+    update_label: str | None
     vertices: list[Vector]
+    pattern_vertices: list[Vector]
     edges: list[tuple[int, int]]
     faces: list[tuple[int, ...]]
     edge_meta: dict[tuple[int, int], EdgeMeta]
@@ -299,7 +307,19 @@ def _triangulate_panel(panel: dict[str, Any], spacing: float) -> PanelGeometry:
         if labels or fold:
             edge_meta[_edge_key(*edge)] = EdgeMeta(next(iter(labels), None), fold)
 
-    return PanelGeometry(panel_id, list(vertices), list(edges), triangles, edge_meta)
+    update_label = panel.get("label")
+    if update_label is not None and (not isinstance(update_label, str) or not update_label):
+        raise MeshLoadError(f"Panel {panel_id!r} has an invalid update label.")
+    result_vertices = list(vertices)
+    return PanelGeometry(
+        panel_id,
+        update_label,
+        result_vertices,
+        [vertex.copy() for vertex in result_vertices],
+        list(edges),
+        triangles,
+        edge_meta,
+    )
 
 
 def _pack_panels(panels: list[PanelGeometry], gap: float) -> None:
@@ -357,6 +377,30 @@ def _write_panel_mesh_attributes(
     for polygon in mesh.polygons:
         panel_attribute.data[polygon.index].value = panel_index
 
+    pattern_attribute = mesh.attributes.new(name="yohsai_pattern_position", type="FLOAT_VECTOR", domain="POINT")
+    for item, point in zip(pattern_attribute.data, panel.pattern_vertices):
+        item.vector = (point.x, point.y, 0.0)
+
+
+def _sewing_signature(document: dict[str, Any]) -> str:
+    groups = document.get("sewing_groups")
+    if not isinstance(groups, dict):
+        raise MeshLoadError("Yohsai JSON has no sewing_groups object.")
+    normalized: dict[str, list[tuple[str, int]]] = {}
+    for label, references in groups.items():
+        if not isinstance(label, str) or not isinstance(references, list):
+            raise MeshLoadError("Yohsai JSON has an invalid sewing group.")
+        values: list[tuple[str, int]] = []
+        for reference in references:
+            if not isinstance(reference, dict):
+                raise MeshLoadError("Yohsai JSON has an invalid sewing reference.")
+            try:
+                values.append((str(reference["panel"]), int(reference["segment"])))
+            except (KeyError, TypeError, ValueError) as exc:
+                raise MeshLoadError("Yohsai JSON has an invalid sewing reference.") from exc
+        normalized[label.upper()] = sorted(values)
+    return json.dumps(normalized, sort_keys=True, separators=(",", ":"))
+
 
 def create_clothes_mesh(context, document: dict[str, Any]) -> bpy.types.Collection:
     """Create one editable Blender object per expanded pattern panel."""
@@ -398,11 +442,14 @@ def create_clothes_mesh(context, document: dict[str, Any]) -> bpy.types.Collecti
             obj["yohsai_source_svg"] = str(source.get("svg_path", ""))
             obj["yohsai_mesh_spacing_m"] = MESH_SPACING_M
             obj["yohsai_panel_id"] = panel.panel_id
+            obj["yohsai_panel_label"] = panel.update_label or ""
             obj["yohsai_panel_index"] = panel_index
 
         collection["yohsai_schema"] = "yohsai-pattern/1.0.0"
         collection["yohsai_role"] = "clothes"
         collection["yohsai_source_svg"] = str(source.get("svg_path", ""))
+        collection["yohsai_sewing_signature"] = _sewing_signature(document)
+        collection["yohsai_sewing_verified"] = False
         context.view_layer.update()
 
         for selected in context.selected_objects:
@@ -420,6 +467,147 @@ def create_clothes_mesh(context, document: dict[str, Any]) -> bpy.types.Collecti
         if collection.name in bpy.data.collections:
             bpy.data.collections.remove(collection)
         raise
+
+
+def _pattern_positions(obj: bpy.types.Object) -> list[Vector]:
+    attribute = obj.data.attributes.get("yohsai_pattern_position")
+    if attribute is None or attribute.domain != "POINT" or len(attribute.data) != len(obj.data.vertices):
+        raise UpdateError(
+            f"{obj.name} has no original pattern coordinates. Load it again with the current Yohsai version."
+        )
+    return [Vector((item.vector[0], item.vector[1])) for item in attribute.data]
+
+
+def _transfer_deformation(obj: bpy.types.Object, panel: PanelGeometry) -> list[Vector]:
+    old_flat = _pattern_positions(obj)
+    old_faces = [tuple(polygon.vertices) for polygon in obj.data.polygons]
+    if not old_faces:
+        raise UpdateError(f"{obj.name} has no faces for deformation transfer.")
+    old_world = [obj.matrix_world @ vertex.co for vertex in obj.data.vertices]
+    old_min = Vector((min(point.x for point in old_flat), min(point.y for point in old_flat)))
+    old_max = Vector((max(point.x for point in old_flat), max(point.y for point in old_flat)))
+    new_min = Vector((min(point.x for point in panel.pattern_vertices), min(point.y for point in panel.pattern_vertices)))
+    new_max = Vector((max(point.x for point in panel.pattern_vertices), max(point.y for point in panel.pattern_vertices)))
+    old_size = old_max - old_min
+    new_size = new_max - new_min
+    if min(old_size.x, old_size.y, new_size.x, new_size.y) <= 1.0e-10:
+        raise UpdateError(f"Panel #{panel.update_label} has degenerate bounds.")
+
+    flat3 = [Vector((point.x, point.y, 0.0)) for point in old_flat]
+    bvh = BVHTree.FromPolygons(flat3, old_faces, all_triangles=False)
+    transferred: list[Vector] = []
+    for point in panel.pattern_vertices:
+        normalized = Vector(((point.x - new_min.x) / new_size.x, (point.y - new_min.y) / new_size.y))
+        old_point = Vector((old_min.x + normalized.x * old_size.x, old_min.y + normalized.y * old_size.y, 0.0))
+        location, _normal, face_index, _distance = bvh.find_nearest(old_point)
+        if face_index is None or location is None:
+            raise UpdateError(f"Panel #{panel.update_label} could not transfer its deformation.")
+        face = old_faces[int(face_index)]
+        if len(face) != 3:
+            raise UpdateError(f"{obj.name} contains a non-triangular face.")
+        a, b, c = face
+        transferred.append(
+            barycentric_transform(location, flat3[a], flat3[b], flat3[c], old_world[a], old_world[b], old_world[c])
+        )
+    return transferred
+
+
+def _remove_sewn_preview(collection: bpy.types.Collection) -> None:
+    for obj in list(collection.objects):
+        if obj.get("yohsai_role") != "sewn":
+            continue
+        mesh = obj.data
+        bpy.data.objects.remove(obj, do_unlink=True)
+        if mesh.users == 0:
+            bpy.data.meshes.remove(mesh)
+
+
+def update_clothes_mesh(context, collection: bpy.types.Collection, document: dict[str, Any]) -> tuple[bool, int]:
+    """Recut all labeled panels, transfer their current pose, and atomically replace their meshes."""
+    if collection is None or collection.get("yohsai_role") != "clothes":
+        raise UpdateError("No loaded Yohsai clothes collection is selected.")
+    source = document.get("source")
+    panels_json = document.get("panels")
+    if not isinstance(source, dict) or not isinstance(panels_json, list) or not panels_json:
+        raise UpdateError("Updated Yohsai JSON has no valid source or panels.")
+    old_source = str(collection.get("yohsai_source_svg", ""))
+    new_source = str(source.get("svg_path", ""))
+    if not old_source or not new_source or bpy.path.abspath(old_source) != bpy.path.abspath(new_source):
+        raise UpdateError("Update must use the same SVG file as the selected Clothes collection.")
+
+    parts = sorted(
+        (obj for obj in collection.objects if obj.type == "MESH" and obj.get("yohsai_role") == "part"),
+        key=lambda obj: int(obj.get("yohsai_panel_index", 0)),
+    )
+    if len(parts) != len(panels_json):
+        raise UpdateError(f"Panel object count changed: expected {len(parts)}, found {len(panels_json)}.")
+    old_by_label: dict[str, bpy.types.Object] = {}
+    for obj in parts:
+        label = str(obj.get("yohsai_panel_label", ""))
+        if not label:
+            raise UpdateError(f"{obj.name} has no # panel label. Load the labeled pattern again first.")
+        if label in old_by_label:
+            raise UpdateError(f"Existing panel label #{label} is duplicated.")
+        old_by_label[label] = obj
+
+    panels = [_triangulate_panel(panel, MESH_SPACING_M) for panel in panels_json]
+    new_by_label: dict[str, PanelGeometry] = {}
+    for panel in panels:
+        if not panel.update_label:
+            raise UpdateError(f"Updated panel {panel.panel_id!r} has no # label.")
+        if panel.update_label in new_by_label:
+            raise UpdateError(f"Updated panel label #{panel.update_label} is duplicated.")
+        new_by_label[panel.update_label] = panel
+    if set(old_by_label) != set(new_by_label):
+        missing = sorted(set(old_by_label) - set(new_by_label))
+        unexpected = sorted(set(new_by_label) - set(old_by_label))
+        raise UpdateError(f"Panel labels changed; missing={missing}, unexpected={unexpected}.")
+
+    prepared: list[tuple[bpy.types.Object, bpy.types.Mesh, PanelGeometry]] = []
+    try:
+        for label, obj in old_by_label.items():
+            panel = new_by_label[label]
+            world_positions = _transfer_deformation(obj, panel)
+            inverse = obj.matrix_world.inverted_safe()
+            local_positions = [inverse @ point for point in world_positions]
+            mesh = bpy.data.meshes.new(f"{obj.name}_UPDATE")
+            mesh.from_pydata(local_positions, panel.edges, panel.faces)
+            mesh.validate(verbose=False, clean_customdata=False)
+            mesh.update(calc_edges=True, calc_edges_loose=True)
+            _write_panel_mesh_attributes(mesh, panel, int(obj.get("yohsai_panel_index", 0)))
+            for material in obj.data.materials:
+                mesh.materials.append(material)
+            prepared.append((obj, mesh, panel))
+    except Exception:
+        for _obj, mesh, _panel in prepared:
+            if mesh.users == 0:
+                bpy.data.meshes.remove(mesh)
+        raise
+
+    old_meshes: list[bpy.types.Mesh] = []
+    for obj, mesh, panel in prepared:
+        old_meshes.append(obj.data)
+        obj.data = mesh
+        obj["yohsai_source_svg"] = new_source
+        obj["yohsai_mesh_spacing_m"] = MESH_SPACING_M
+        obj["yohsai_panel_id"] = panel.panel_id
+        obj["yohsai_panel_label"] = panel.update_label
+        obj.hide_set(False)
+        obj.hide_render = False
+    _remove_sewn_preview(collection)
+    for mesh in old_meshes:
+        if mesh.users == 0:
+            bpy.data.meshes.remove(mesh)
+
+    old_signature = str(collection.get("yohsai_sewing_signature", ""))
+    new_signature = _sewing_signature(document)
+    sewing_changed = old_signature != new_signature
+    collection["yohsai_source_svg"] = new_source
+    collection["yohsai_sewing_signature"] = new_signature
+    if sewing_changed:
+        collection["yohsai_sewing_verified"] = False
+    context.view_layer.update()
+    return sewing_changed, sum(len(obj.data.vertices) for obj in parts)
 
 
 @dataclass(frozen=True)
@@ -550,30 +738,61 @@ def _ordered_vertex_pairs(left: _SeamChain, right: _SeamChain, label: str) -> li
     return pairs
 
 
+@dataclass(frozen=True)
+class SewingPlan:
+    parts: tuple[bpy.types.Object, ...]
+    labels: tuple[str, ...]
+    connections: tuple[tuple[str, int, int], ...]
+
+
+def build_sewing_plan(collection: bpy.types.Collection) -> SewingPlan:
+    """Validate and return reusable global-index sewing connections for separate parts."""
+    if collection is None or collection.get("yohsai_role") != "clothes":
+        raise SewingError("No loaded Yohsai clothes collection is selected.")
+    parts = tuple(sorted(
+        (obj for obj in collection.objects if obj.type == "MESH" and obj.get("yohsai_role") == "part"),
+        key=lambda obj: int(obj.get("yohsai_panel_index", 0)),
+    ))
+    if len(parts) < 2:
+        raise SewingError("Sewing needs at least two separate cloth parts.")
+    labels = tuple(sorted(set().union(*(_sewing_labels(obj.data) for obj in parts))))
+    if not labels:
+        raise SewingError("The loaded cloth parts contain no sewing groups.")
+
+    offsets: dict[bpy.types.Object, int] = {}
+    offset = 0
+    for obj in parts:
+        offsets[obj] = offset
+        offset += len(obj.data.vertices)
+    connections: list[tuple[str, int, int]] = []
+    spring_keys: set[tuple[int, int]] = set()
+    for label in labels:
+        by_object = {obj: chains for obj in parts if (chains := _seam_chains(obj, label))}
+        if len(by_object) != 2:
+            raise SewingError(f"Sewing group {label} must occur on exactly two different cloth parts.")
+        first_obj, second_obj = sorted(by_object, key=lambda obj: int(obj.get("yohsai_panel_index", 0)))
+        for left_chain, right_chain in _pair_chains(by_object[first_obj], by_object[second_obj], label):
+            for left_vertex, right_vertex in _ordered_vertex_pairs(left_chain, right_chain, label):
+                a = offsets[first_obj] + left_vertex
+                b = offsets[second_obj] + right_vertex
+                key = _edge_key(a, b)
+                if key in spring_keys:
+                    raise SewingError("Two sewing groups produce the same sewing spring.")
+                spring_keys.add(key)
+                connections.append((label, a, b))
+    return SewingPlan(parts, labels, tuple(connections))
+
+
 def create_sewn_mesh(context, collection: bpy.types.Collection) -> bpy.types.Object:
     """Merge positioned source parts and add loose sewing-spring edges."""
     if collection is None or collection.get("yohsai_role") != "clothes":
         raise SewingError("No loaded Yohsai clothes collection is selected.")
     if any(obj.get("yohsai_role") == "sewn" for obj in collection.objects):
         raise SewingError(f"{collection.name} already has a sewn mesh.")
-    parts = sorted(
-        (obj for obj in collection.objects if obj.type == "MESH" and obj.get("yohsai_role") == "part"),
-        key=lambda obj: int(obj.get("yohsai_panel_index", 0)),
-    )
-    if len(parts) < 2:
-        raise SewingError("Sewing needs at least two separate cloth parts.")
     context.view_layer.update()
-
-    labels = sorted(set().union(*(_sewing_labels(obj.data) for obj in parts)))
-    if not labels:
-        raise SewingError("The loaded cloth parts contain no sewing groups.")
-
-    chains_by_label: dict[str, dict[bpy.types.Object, list[_SeamChain]]] = {}
-    for label in labels:
-        by_object = {obj: chains for obj in parts if (chains := _seam_chains(obj, label))}
-        if len(by_object) != 2:
-            raise SewingError(f"Sewing group {label} must occur on exactly two different cloth parts.")
-        chains_by_label[label] = by_object
+    plan = build_sewing_plan(collection)
+    parts = list(plan.parts)
+    labels = list(plan.labels)
 
     vertices: list[tuple[float, float, float]] = []
     edges: list[tuple[int, int]] = []
@@ -601,18 +820,9 @@ def create_sewn_mesh(context, collection: bpy.types.Collection) -> bpy.types.Obj
         face_panel_indices.extend([int(obj.get("yohsai_panel_index", 0))] * len(mesh.polygons))
 
     spring_indices: dict[str, list[int]] = {label: [] for label in labels}
-    spring_keys: set[tuple[int, int]] = set()
-    for label, by_object in chains_by_label.items():
-        first_obj, second_obj = sorted(by_object, key=lambda obj: int(obj.get("yohsai_panel_index", 0)))
-        for left_chain, right_chain in _pair_chains(by_object[first_obj], by_object[second_obj], label):
-            for left_vertex, right_vertex in _ordered_vertex_pairs(left_chain, right_chain, label):
-                edge = (offsets[first_obj] + left_vertex, offsets[second_obj] + right_vertex)
-                key = _edge_key(*edge)
-                if key in spring_keys:
-                    raise SewingError("Two sewing groups produce the same sewing spring.")
-                spring_keys.add(key)
-                spring_indices[label].append(len(edges))
-                edges.append(edge)
+    for label, a, b in plan.connections:
+        spring_indices[label].append(len(edges))
+        edges.append((a, b))
 
     name = f"{collection.name}_SEWN"
     mesh = bpy.data.meshes.new(name)
@@ -636,6 +846,7 @@ def create_sewn_mesh(context, collection: bpy.types.Collection) -> bpy.types.Obj
         obj["yohsai_source_svg"] = str(collection.get("yohsai_source_svg", ""))
         obj["yohsai_sewing_groups"] = labels
         obj["yohsai_source_parts"] = [part.name for part in parts]
+        collection["yohsai_sewing_verified"] = True
 
         for selected in context.selected_objects:
             selected.select_set(False)

@@ -1,7 +1,7 @@
 schema_version = "1.0.0"
 
 id = "yohsai"
-version = "0.1.9"
+version = "0.1.10"
 name = "Yohsai"
 tagline = "Experimental clothing construction tools"
 maintainer = "Yohsai Developers"
@@ -37,6 +37,7 @@ paths = [
     "yohsai_defaults.json",
     "SVG_TO_JSON_SPEC.md",
     "KITSUKE_DESIGN.md",
+    "DESIGN_PHILOSOPHY.md",
     "README.md",
     "DEVELOPMENT_NOTES.md",
     "LICENSE",

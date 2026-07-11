@@ -2,7 +2,7 @@
 
 Status: active implementation and empirical tuning  
 Recorded: 2026-07-11 (Asia/Tokyo)  
-Current tested package: Yohsai 0.1.9, Windows x64, Blender 5.2 / Python 3.13,
+Current tested package: Yohsai 0.1.10, Windows x64, Blender 5.2 / Python 3.13,
 Taichi 1.7.4
 
 ## 1. Product idea
@@ -215,7 +215,7 @@ fast-moving regions such as the shoulder, breast, and abdomen.
 - Friction is not yet modeled.
 - Panel mass and textile-specific stretch/bend parameters are not exposed.
 - Runtime state is not serialized.
-- The bundled 0.1.9 distribution is Windows x64 / CPython 3.13.
+- The bundled 0.1.10 distribution is Windows x64 / CPython 3.13.
 - Taichi wheels make the extension archive approximately 85 MB.
 
 XPBD is a likely later improvement because compliance reduces dependence on
@@ -226,7 +226,7 @@ current interaction model rather than block tuning of the central workflow.
 
 When work resumes:
 
-1. Use `dist/yohsai-0.1.9.zip` unless a newer build exists.
+1. Use `dist/yohsai-0.1.10.zip` unless a newer build exists.
 2. Fully close Blender and Blender MCP before replacing the extension, because
    the loaded Taichi native library may lock its wheel files on Windows.
 3. Start a new Load/Sewing session after an extension restart.

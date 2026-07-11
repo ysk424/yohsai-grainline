@@ -79,6 +79,7 @@ The initial profile recognizes:
 
 - `@S<number>cm`: scale reference, for example `@S99cm`;
 - `@W`: a fold/symmetry marker;
+- `#<label>`: a stable panel identity for Update;
 - a single ASCII letter `A` through `Z`: a sewing-group marker.
 
 Text may use `text`/`tspan` nesting. Its transformed SVG text origin is the
@@ -127,9 +128,21 @@ distance tie is an ambiguity error.
 That segment receives `fold: true`. The parser records the fold edge but does not
 expand or mirror the panel. An exact distance tie is an ambiguity error.
 
+### 6.3 Panel label
+
+A `#` label belongs to the one closed panel containing the transformed text
+origin. Zero or multiple containing panels is an error; Yohsai does not select a
+nearest panel. Update requires exactly one label in every panel.
+
+All whitespace characters are removed before parsing. The leading `#` is not
+part of the stored value. ASCII letters compare case-insensitively and normalize
+to uppercase. ASCII letters, digits, underscore, and hyphen are accepted. Empty,
+invalid, or duplicate normalized labels are errors.
+
 ## 7. Panel and segment identity
 
-If an SVG path has an `id`, it is used as the panel name. When one path contains
+An explicit `#` label is the panel ID. Without a label, if an SVG path has an
+`id`, it is used as the panel name. When one path contains
 multiple closed subpaths, suffixes `_001`, `_002`, and so on are appended. If no
 usable ID exists, deterministic names `panel_001`, `panel_002`, and so on are
 assigned in document order.
@@ -161,8 +174,20 @@ The output is UTF-8 JSON with this top-level structure:
 }
 ```
 
-Each panel has an ID, source path ID, `closed: true`, and an ordered `segments`
-array. A straight segment is:
+Each panel has an ID, optional normalized `label`, source path ID, `closed:
+true`, and an ordered `segments` array. A labeled panel begins:
+
+```json
+{
+  "id": "FRONT01",
+  "label": "FRONT01",
+  "source_path_id": "path123",
+  "closed": true,
+  "segments": []
+}
+```
+
+A straight segment is:
 
 ```json
 {
@@ -209,6 +234,7 @@ The Yohsai N-panel exposes:
 
 - `SVG Path`: a file selector for an SVG document;
 - `Load`: parse the SVG and create separate cloth-part objects;
+- `Update`: recut the selected Clothes collection from the same saved SVG;
 - `Clothes`: the loaded numbered collection used by later actions;
 - `Sewing`: build the combined sewn preview after manual part placement;
 - `Body`: select the fixed collision mesh used by Kitsuke;
@@ -324,14 +350,42 @@ changed in the pattern and loaded as a new clothes collection. The Body is
 constant after its first evaluated snapshot. Runtime velocity is not persisted
 across reopening a Blender file.
 
-Version 0.1.9 temporarily exposes gravity and seam closure in the N-panel; their
+Version 0.1.10 temporarily exposes gravity and seam closure in the N-panel; their
 current values are read on every click without reconstructing the session.
 
 Taichi selects an available GPU architecture automatically and uses an explicit
-CPU fallback when GPU initialization fails. The 0.1.9 package supplies Windows
+CPU fallback when GPU initialization fails. The 0.1.10 package supplies Windows
 x64 CPython 3.13 wheels.
 
-## 13. Future compatibility
+## 13. Update
+
+Update rereads the same absolute SVG path that created the selected Clothes
+collection. The number and normalized set of `#`-labeled panel objects must be
+unchanged. The operation generates entirely new panel meshes; vertex and face
+counts may differ.
+
+Load stores each vertex's authoritative flat-pattern position as the Point
+attribute `yohsai_pattern_position`. Update normalizes the revised and previous
+panel bounds, locates the corresponding old flat triangle, and barycentrically
+interpolates its current world-space deformation onto each new vertex. This is
+an initial-placement convenience, not a claim that the old and new cloth are
+physically identical.
+
+Existing objects, transforms, materials, collection membership, names, and
+panel indices remain. Revised flat coordinates define new stretch and bend rest
+lengths. Runtime velocity and the previous Kitsuke session are discarded.
+
+Update prepares all meshes before changing Blender data. Any missing, duplicate,
+unexpected, or ambiguous label, panel-count change, parse error, triangulation
+error, or transfer failure cancels the whole operation without modifying the
+existing garment.
+
+The sewing signature contains normalized sewing labels and their panel/segment
+membership, but not geometry coordinates. An unchanged signature preserves the
+verified Sewing state and permits direct Kitsuke. A changed signature clears
+verification; Kitsuke refuses with `Sewing required` until Sewing succeeds.
+
+## 14. Future compatibility
 
 Future versions may add darts, notches, grain lines, seam order and direction,
 additional SVG primitives, error-checker interoperability, and Blender geometry

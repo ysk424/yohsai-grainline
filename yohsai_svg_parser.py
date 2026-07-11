@@ -125,6 +125,7 @@ class Panel:
     panel_id: str
     source_path_id: str | None
     segments: list[Segment]
+    update_label: str | None = None
 
 
 _NUMBER = r"[-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?"
@@ -133,6 +134,7 @@ _NUMBER_RE = re.compile(_NUMBER)
 _TRANSFORM_RE = re.compile(r"([A-Za-z]+)\s*\(([^)]*)\)")
 _SCALE_RE = re.compile(r"^@s\s*(" + _NUMBER + r")\s*cm$", re.IGNORECASE)
 _SEW_RE = re.compile(r"^[A-Z]$", re.IGNORECASE)
+_PANEL_LABEL_RE = re.compile(r"^[A-Z0-9_-]+$", re.IGNORECASE)
 
 
 def _clean_float(value: float) -> float:
@@ -408,6 +410,67 @@ def _nearest_panel_segment(annotation: Annotation, panels: list[Panel]) -> tuple
     return best[1], best[2], best[3]
 
 
+def _panel_polygon(panel: Panel) -> list[Point]:
+    points: list[Point] = []
+    for segment in panel.segments:
+        sampled = segment.points_for_distance(steps=64)
+        points.extend(sampled if not points else sampled[1:])
+    if len(points) > 1 and _distance(points[0], points[-1]) <= 1.0e-9:
+        points.pop()
+    return points
+
+
+def _point_in_polygon(point: Point, polygon: list[Point]) -> bool:
+    inside = False
+    previous = polygon[-1]
+    for current in polygon:
+        if (current.y > point.y) != (previous.y > point.y):
+            crossing_x = (previous.x - current.x) * (point.y - current.y) / (previous.y - current.y) + current.x
+            if point.x < crossing_x:
+                inside = not inside
+        previous = current
+    return inside
+
+
+def _normalize_panel_label(text: str) -> str:
+    compact = "".join(text.split())
+    if not compact.startswith("#"):
+        raise ParseError(f"Panel label must start with '#': {text!r}")
+    label = compact[1:].upper()
+    if not label or not _PANEL_LABEL_RE.fullmatch(label):
+        raise ParseError(
+            f"Invalid panel label {text!r}; use ASCII letters, digits, underscore, or hyphen after '#'."
+        )
+    return label
+
+
+def _assign_panel_labels(annotations: list[Annotation], panels: list[Panel]) -> set[Annotation]:
+    label_annotations = {
+        annotation for annotation in annotations if "".join(annotation.text.split()).startswith("#")
+    }
+    used: dict[str, Panel] = {}
+    polygons = {id(panel): _panel_polygon(panel) for panel in panels}
+    for annotation in label_annotations:
+        label = _normalize_panel_label(annotation.text)
+        containing = [panel for panel in panels if _point_in_polygon(annotation.position, polygons[id(panel)])]
+        if len(containing) != 1:
+            raise ParseError(
+                f"Panel label {annotation.text!r} must be inside exactly one closed panel; found {len(containing)}."
+            )
+        panel = containing[0]
+        if panel.update_label is not None:
+            raise ParseError(f"Panel {panel.panel_id!r} contains more than one # label.")
+        if label in used:
+            raise ParseError(f"Duplicate panel label #{label}.")
+        panel.update_label = label
+        panel.panel_id = label
+        used[label] = panel
+    final_ids = [panel.panel_id for panel in panels]
+    if len(set(final_ids)) != len(final_ids):
+        raise ParseError("Panel labels conflict with another panel ID.")
+    return label_annotations
+
+
 def _unique_panel_id(preferred: str, used: set[str]) -> str:
     candidate = preferred
     suffix = 2
@@ -518,8 +581,11 @@ def parse_svg(svg_path: str | os.PathLike[str]) -> dict[str, object]:
     meters_per_svg_unit = reference_centimeters / 100.0 / reference_svg_length
 
     data_annotations = [annotation for annotation in annotations if annotation is not scale_annotation]
+    panel_label_annotations = _assign_panel_labels(data_annotations, panels)
     sewing_groups: dict[str, list[dict[str, object]]] = {}
     for annotation in data_annotations:
+        if annotation in panel_label_annotations:
+            continue
         normalized = annotation.text.strip().upper()
         panel, segment_index, segment = _nearest_panel_segment(annotation, panels)
         if normalized == "@W":
@@ -551,6 +617,7 @@ def parse_svg(svg_path: str | os.PathLike[str]) -> dict[str, object]:
         "panels": [
             {
                 "id": panel.panel_id,
+                "label": panel.update_label,
                 "source_path_id": panel.source_path_id,
                 "closed": True,
                 "segments": [

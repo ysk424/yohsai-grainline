@@ -1,4 +1,4 @@
-# Yohsai 0.1.9
+# Yohsai 0.1.10
 
 Yohsai is a public, in-development Blender extension for clothing construction.
 The API, data shape, and generated output are still experimental.
@@ -42,6 +42,24 @@ its endpoints. It preserves the original parts as hidden source objects and
 creates one combined `<collection>_SEWN` mesh with loose sewing-spring edges.
 This step does not add a Cloth modifier.
 
+## Pattern Update
+
+Place one unique `#` text label inside every closed pattern panel, for example
+`#FRONT01` or `#BACK-BODICE`. Label whitespace is removed, ASCII letter case is
+ignored, and digits, underscore, and hyphen are supported. After changing and
+saving the same Illustrator SVG, press `Update` instead of Load.
+
+Update recuts every labeled panel into new mesh data and transfers the old
+garment's current 3D pose as an initial placement. Existing panel objects,
+materials, transforms, and collection ownership remain. New flat-pattern
+coordinates become the authoritative stretch and bend rest state, and velocity
+is reset. The operation is atomic: label, panel-count, parsing, triangulation,
+or transfer failures leave the existing garment unchanged.
+
+If authored sewing membership is unchanged, press Kitsuke directly. If it
+changed, Kitsuke reports `Sewing required`; inspect a new Sewing preview before
+continuing.
+
 ## Incremental Kitsuke
 
 After inspecting the `Sewing` preview, select a fixed mesh `Body` and press
@@ -53,7 +71,7 @@ restores every pattern panel as a separate object. Move and rotate any one or
 more panels in Object Mode, press `Kitsuke` again, and repeat while the seams
 close and the garment approaches the body.
 
-Version 0.1.9 temporarily exposes `Gravity` in m/s² and `Seam Pull` in
+Version 0.1.10 temporarily exposes `Gravity` in m/s² and `Seam Pull` in
 mm/click in the N-panel for empirical tuning. Changes take effect on the next
 Kitsuke click without rebuilding the session.
 
@@ -64,12 +82,14 @@ evaluated once on the first step and remains a fixed collider. Body/cloth and
 cloth/cloth contact thickness is 2 mm, while paired seam points target 0 mm.
 
 Taichi chooses an available GPU backend automatically and falls back to the CPU
-only when no GPU backend initializes. Version 0.1.9 bundles the CPython 3.13
+only when no GPU backend initializes. Version 0.1.10 bundles the CPython 3.13
 Windows x64 wheels and is packaged for Windows x64.
 
 The input and JSON contracts are documented in `SVG_TO_JSON_SPEC.md`.
 The complete Kitsuke workflow, solver invariants, tuning history, current
 parameters, and resume checklist are recorded in `KITSUKE_DESIGN.md`.
+The pattern-designer viewpoint that governs Update, Sewing, Kitsuke, annotation
+design, and future automation is recorded in `DESIGN_PHILOSOPHY.md`.
 
 ## Package
 
@@ -83,6 +103,7 @@ The extension manifest is `blender_manifest.toml`. The source package contains:
 - `yohsai_defaults.json`
 - `SVG_TO_JSON_SPEC.md`
 - `KITSUKE_DESIGN.md`
+- `DESIGN_PHILOSOPHY.md`
 - `README.md`
 - `DEVELOPMENT_NOTES.md`
 - `LICENSE`
