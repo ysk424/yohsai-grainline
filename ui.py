@@ -76,6 +76,16 @@ def _bundled_python() -> str:
     raise FileNotFoundError("Blender's bundled Python executable was not found.")
 
 
+def _parser_environment() -> dict[str, str]:
+    environment = os.environ.copy()
+    inherited_paths = [path for path in sys.path if isinstance(path, str) and path]
+    existing = environment.get("PYTHONPATH")
+    if existing:
+        inherited_paths.append(existing)
+    environment["PYTHONPATH"] = os.pathsep.join(dict.fromkeys(inherited_paths))
+    return environment
+
+
 def _set_parse_status(message: str) -> None:
     if _parse_scene_name:
         scene = bpy.data.scenes.get(_parse_scene_name)
@@ -92,7 +102,7 @@ def _validate_loaded_json(document: object, svg_path: str) -> dict:
         raise ValueError("Parser output does not use meters.")
     source = document.get("source")
     if not isinstance(source, dict) or Path(str(source.get("svg_path", ""))).resolve() != Path(svg_path).resolve():
-        raise ValueError("Parser output belongs to a different SVG file.")
+        raise ValueError("Parser output belongs to a different pattern file.")
     if not isinstance(document.get("panels"), list):
         raise ValueError("Parser output has no panels array.")
     return document
@@ -236,8 +246,8 @@ def _write_silhouette_svg(context, obj: Object, axis: str, filepath: str) -> Non
 
 class YohsaiProperties(PropertyGroup):
     svg_path: StringProperty(
-        name="SVG Path",
-        description="Adobe Illustrator SVG containing the CLOTHES layer",
+        name="Pattern Path",
+        description="Adobe Illustrator PDF or SVG pattern file",
         subtype="FILE_PATH",
         default="",
     )
@@ -319,22 +329,22 @@ class YOHSAI_OT_export_silhouette(Operator):
 class YOHSAI_OT_load_svg(Operator):
     bl_idname = "yohsai.load_svg"
     bl_label = "Load"
-    bl_description = "Parse the selected Illustrator SVG and load its Yohsai JSON"
+    bl_description = "Parse the selected Illustrator PDF or SVG and load its Yohsai JSON"
     bl_options = {"REGISTER"}
 
     def execute(self, context):
         global _parse_process, _parse_scene_name, _parse_svg_path, _parse_action, _parse_collection_name
         if _parse_process is not None and _parse_process.poll() is None:
-            self.report({"WARNING"}, "An SVG is already being loaded.")
+            self.report({"WARNING"}, "A pattern is already being loaded.")
             return {"CANCELLED"}
 
         raw_path = context.scene.yohsai.svg_path
         if not raw_path:
-            self.report({"ERROR"}, "Select an SVG file first.")
+            self.report({"ERROR"}, "Select a PDF or SVG pattern file first.")
             return {"CANCELLED"}
         svg_path = str(Path(bpy.path.abspath(raw_path)).resolve())
-        if not os.path.isfile(svg_path) or Path(svg_path).suffix.lower() != ".svg":
-            self.report({"ERROR"}, "SVG Path must point to an existing .svg file.")
+        if not os.path.isfile(svg_path) or Path(svg_path).suffix.lower() not in {".svg", ".pdf"}:
+            self.report({"ERROR"}, "Pattern Path must point to an existing .pdf or .svg file.")
             return {"CANCELLED"}
 
         parser_path = Path(__file__).with_name(_PARSER_FILENAME)
@@ -354,9 +364,10 @@ class YOHSAI_OT_load_svg(Operator):
                 encoding="utf-8",
                 errors="replace",
                 creationflags=creationflags,
+                env=_parser_environment(),
             )
         except Exception as exc:
-            self.report({"ERROR"}, f"Could not start SVG parser: {exc}")
+            self.report({"ERROR"}, f"Could not start pattern parser: {exc}")
             return {"CANCELLED"}
 
         _parse_scene_name = context.scene.name
@@ -372,13 +383,13 @@ class YOHSAI_OT_load_svg(Operator):
 class YOHSAI_OT_update_svg(Operator):
     bl_idname = "yohsai.update_svg"
     bl_label = "Update"
-    bl_description = "Recut the selected Clothes collection from the saved SVG and transfer its current 3D placement"
+    bl_description = "Recut the selected Clothes collection from the saved PDF or SVG and transfer its current 3D placement"
     bl_options = {"REGISTER", "UNDO"}
 
     def execute(self, context):
         global _parse_process, _parse_scene_name, _parse_svg_path, _parse_action, _parse_collection_name
         if _parse_process is not None and _parse_process.poll() is None:
-            self.report({"WARNING"}, "An SVG is already being processed.")
+            self.report({"WARNING"}, "A pattern is already being processed.")
             return {"CANCELLED"}
         props = context.scene.yohsai
         collection = props.clothes_collection
@@ -387,15 +398,15 @@ class YOHSAI_OT_update_svg(Operator):
             return {"CANCELLED"}
         raw_path = props.svg_path
         if not raw_path:
-            self.report({"ERROR"}, "Select the original SVG file first.")
+            self.report({"ERROR"}, "Select the original PDF or SVG file first.")
             return {"CANCELLED"}
         svg_path = str(Path(bpy.path.abspath(raw_path)).resolve())
-        if not os.path.isfile(svg_path) or Path(svg_path).suffix.lower() != ".svg":
-            self.report({"ERROR"}, "SVG Path must point to the existing source .svg file.")
+        if not os.path.isfile(svg_path) or Path(svg_path).suffix.lower() not in {".svg", ".pdf"}:
+            self.report({"ERROR"}, "Pattern Path must point to the existing source .pdf or .svg file.")
             return {"CANCELLED"}
         source_path = str(Path(str(collection.get("yohsai_source_svg", ""))).resolve())
         if os.path.normcase(svg_path) != os.path.normcase(source_path):
-            self.report({"ERROR"}, "Update must use the same SVG file that created the selected Clothes collection.")
+            self.report({"ERROR"}, "Update must use the same pattern file that created the selected Clothes collection.")
             return {"CANCELLED"}
         parser_path = Path(__file__).with_name(_PARSER_FILENAME)
         try:
@@ -411,9 +422,10 @@ class YOHSAI_OT_update_svg(Operator):
                 encoding="utf-8",
                 errors="replace",
                 creationflags=creationflags,
+                env=_parser_environment(),
             )
         except Exception as exc:
-            self.report({"ERROR"}, f"Could not start SVG parser: {exc}")
+            self.report({"ERROR"}, f"Could not start pattern parser: {exc}")
             return {"CANCELLED"}
         _parse_scene_name = context.scene.name
         _parse_svg_path = svg_path

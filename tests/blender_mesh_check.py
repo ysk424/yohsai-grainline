@@ -26,9 +26,10 @@ else:
     from yohsai.mesh_loader import MeshLoadError  # noqa: E402
 
 
-svg_path = Path.home() / "Desktop" / "test2.svg"
+pdf_input = Path.home() / "Desktop" / "test2.pdf"
+svg_path = pdf_input if pdf_input.is_file() else Path.home() / "Desktop" / "test2.svg"
 if not svg_path.is_file():
-    raise RuntimeError(f"Missing integration input: {svg_path}")
+    raise RuntimeError("Missing integration input: Desktop/test2.pdf or Desktop/test2.svg")
 
 if not installed_check:
     yohsai.register()
@@ -47,6 +48,8 @@ try:
     assert len(collection.objects) == 2
     parts = sorted(collection.objects, key=lambda item: item.name)
     assert [obj.name for obj in parts] == ["CLOTHES_001_PART_001", "CLOTHES_001_PART_002"]
+    if svg_path.suffix.lower() == ".pdf":
+        assert [obj["yohsai_panel_label"] for obj in parts] == ["OMOTE", "URA"]
     assert all(obj.type == "MESH" and obj.get("yohsai_role") == "part" for obj in parts)
     assert all(len(obj.modifiers) == 0 for obj in parts)
     assert sum(len(obj.data.vertices) for obj in parts) > 100

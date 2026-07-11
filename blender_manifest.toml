@@ -1,7 +1,7 @@
 schema_version = "1.0.0"
 
 id = "yohsai"
-version = "0.1.10"
+version = "0.1.11"
 name = "Yohsai"
 tagline = "Experimental clothing construction tools"
 maintainer = "Yohsai Developers"
@@ -22,10 +22,12 @@ wheels = [
     "./wheels/markdown_it_py-4.2.0-py3-none-any.whl",
     "./wheels/pygments-2.20.0-py3-none-any.whl",
     "./wheels/mdurl-0.1.2-py3-none-any.whl",
+    "./wheels/pypdf-6.14.2-py3-none-any.whl",
+    "./wheels/typing_extensions-4.16.0-py3-none-any.whl",
 ]
 
 [permissions]
-files = "Load pattern SVG and write Yohsai JSON and silhouette SVG"
+files = "Load pattern PDF or SVG and write Yohsai JSON and silhouette SVG"
 
 [build]
 paths = [

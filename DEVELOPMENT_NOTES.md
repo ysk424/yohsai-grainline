@@ -2,7 +2,7 @@
 
 Status: public development preview.
 
-Current version: 0.1.10.
+Current version: 0.1.11.
 
 The authoritative Kitsuke design, tuning log, known limitations, and resume
 checklist are maintained in `KITSUKE_DESIGN.md`.
@@ -45,15 +45,17 @@ adding sewing or fitting behavior.
 ## Current State
 
 - The add-on registers a `Yohsai` N-panel in the 3D View sidebar.
-- `SVG Path` and `Load` run a standard-library-only SVG parser in a separate
-  process and asynchronously load its fixed, atomically written JSON result.
+- `Pattern Path` and `Load` accept PDF or SVG, run the parser in a separate
+  process, and asynchronously load its fixed, atomically written JSON result.
+  PDF is the preferred Illustrator interchange and uses bundled `pypdf` and
+  `typing_extensions` wheels; SVG remains a compatibility input.
 - Load expands fold-cut panels and creates one packed, cloth-ready triangular
   Mesh object per closed panel in a new numbered `CLOTHES_###` collection.
   Sewing and fold membership are preserved as mesh attributes.
 - `#` text inside a panel provides a normalized, human-authored identity for
   Update. Whitespace is removed; ASCII letters compare case-insensitively; and
   digits, underscore, and hyphen are accepted.
-- `Update` asynchronously rereads the same SVG, recuts all labeled panels,
+- `Update` asynchronously rereads the same PDF or SVG, recuts all labeled panels,
   transfers the current 3D pose through stored flat-pattern coordinates, and
   atomically swaps new Mesh datablocks into the existing objects. New pattern
   geometry owns rest lengths and velocities reset to zero.
@@ -76,7 +78,10 @@ adding sewing or fitting behavior.
   rolled back before Blender mesh data is changed.
   Gravity and seam closure are temporarily exposed in the N-panel for repeated
   empirical tuning and are read again on every click.
-- SVG parsing currently covers the exact `CLOTHES` layer, closed line/cubic
+- PDF parsing reads closed line/cubic paths containing unique `#` labels and
+  ignores unrelated unlabeled artwork. PDF page points supply physical scale;
+  `@S<number>cm` remains required as pattern metadata. SVG parsing covers the
+  exact `CLOTHES` layer, closed line/cubic
   paths, meter scaling through `@S<number>cm`, single-letter sewing groups, and
   `@W` fold edges. The contract is documented in `SVG_TO_JSON_SPEC.md`.
 - The panel owns a mesh body pointer, with Blender's object selector/eyedropper.

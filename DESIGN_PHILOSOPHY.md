@@ -45,7 +45,7 @@ old 3D mesh." The mental model is closer to this:
 3. sew the new pieces;
 4. dress and settle the new garment again.
 
-`Update` must follow this model. It parses the saved SVG again and constructs
+`Update` must follow this model. It parses the saved PDF or SVG again and constructs
 new mesh data from the revised pattern. The new pattern dimensions become the
 new rest state. Physical velocity is reset.
 
@@ -73,7 +73,7 @@ model.
 ## 4. Stable labels identify pattern pieces
 
 Human-authored `#` text labels identify corresponding pattern panels across
-SVG saves and Updates. The text origin is placed inside its closed Bezier panel.
+PDF/SVG saves and Updates. The text origin is placed inside its closed Bezier panel.
 If it is not inside exactly one panel, parsing fails rather than guessing.
 
 Label normalization rules:
@@ -101,8 +101,8 @@ The intended rapid iteration loop is:
 5. press `Kitsuke` to settle the newly cut cloth;
 6. repeat.
 
-The SVG path does not change. `Update` rereads the same file selected by
-`SVG Path` and updates the currently selected `Clothes` collection.
+The pattern path does not change. `Update` rereads the same PDF or SVG selected
+by `Pattern Path` and updates the currently selected `Clothes` collection.
 
 For the initial Update scope:
 
@@ -214,4 +214,3 @@ Before implementing a garment feature, ask:
 
 If the answers begin from mesh identity rather than pattern intent, reconsider
 the design before writing code.
-

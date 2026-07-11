@@ -1,13 +1,13 @@
-# Yohsai SVG-to-JSON Specification
+# Yohsai PDF/SVG-to-JSON Specification
 
 Status: initial implementation specification
 Version: 1.0.0
 
 ## 1. Purpose
 
-Yohsai converts garment patterns authored in Adobe Illustrator from SVG into a
+Yohsai converts garment patterns authored in Adobe Illustrator from PDF or SVG into a
 single machine-readable JSON document. The converter is a standalone process.
-Blender starts it with an SVG path, waits asynchronously for it to finish, and
+Blender starts it with a pattern path, waits asynchronously for it to finish, and
 then reads the resulting JSON. The converter does not import Blender modules or
 share memory with Blender.
 
@@ -20,9 +20,10 @@ define Blender operations that consume the preserved sewing metadata.
 
 - Program name: `yohsai_svg_parser.py`.
 - Runtime: the Python interpreter bundled with Blender, in a separate process.
-- Dependencies: Python standard library only.
-- Command line: `python yohsai_svg_parser.py <absolute-svg-path>`.
-- The SVG path is the only positional argument.
+- Dependencies: Python standard library for SVG; bundled `pypdf` and
+  `typing_extensions` wheels for PDF.
+- Command line: `python yohsai_svg_parser.py <absolute-pattern-path>`.
+- The PDF or SVG path is the only positional argument.
 - Working directory: Yohsai's private user data directory.
 - Fixed result name: `yohsai_pattern.json`.
 - Temporary result name: `yohsai_pattern.json.tmp`.
@@ -37,9 +38,29 @@ define Blender operations that consume the preserved sewing metadata.
 Blender must not block its UI while conversion runs. It polls the child process,
 loads the JSON only after exit code `0`, and reports parser errors to the user.
 
-## 3. SVG input profile
+## 3. Input profiles
 
-### 3.1 Data layer
+### 3.1 PDF input profile
+
+PDF is the preferred Adobe Illustrator interchange format. Version 1 accepts
+exactly one page and reads its standard page-content operators; Illustrator
+private editing data is not required. Closed paths containing a valid `#` text
+label are pattern panels. Other closed or open artwork without a panel label is
+ignored, allowing reference silhouettes to remain on the page.
+
+PDF line and cubic Bezier path operators are retained. Text annotations use the
+same `#`, `@W`, `@S<number>cm`, and single-letter sewing syntax as SVG. The
+initial Illustrator compatibility profile also decodes its embedded
+Identity-H ASCII font convention when a ToUnicode map is absent.
+
+PDF coordinates are points and convert directly to meters with
+`0.0254 / 72`. The `@S` annotation remains mandatory as human-readable pattern
+metadata, but PDF does not require a separate scale-reference line. Page Y is
+flipped into Yohsai's upward-positive pattern coordinates.
+
+### 3.2 SVG input profile
+
+#### 3.2.1 Data layer
 
 Only the SVG group whose exact `id` is `CLOTHES` contains pattern data. All
 content outside that group is ignored. A missing layer, more than one matching
@@ -49,7 +70,7 @@ Nested groups in `CLOTHES` are allowed. SVG transforms inherited from those
 groups and transforms on supported elements are applied before measurements and
 output.
 
-### 3.2 Supported geometry
+#### 3.2.2 Supported geometry
 
 The initial profile supports SVG `path` elements composed of:
 
@@ -72,7 +93,7 @@ Each closed subpath is one pattern panel. Multiple closed subpaths in one SVG
 path become separate panels. Open subpaths are not panels; in version 1 they may
 only serve as scale-reference lines.
 
-### 3.3 Text annotations
+#### 3.2.3 Text annotations
 
 Annotation matching is case-insensitive and ignores surrounding whitespace.
 The initial profile recognizes:
@@ -86,9 +107,9 @@ Text may use `text`/`tspan` nesting. Its transformed SVG text origin is the
 annotation position. Empty Illustrator helper text is ignored. Any other
 non-empty text inside `CLOTHES` is an error.
 
-## 4. Scale
+## 4. SVG scale
 
-Exactly one scale annotation is required. The numeric value must be finite and
+For SVG, exactly one scale annotation is required. The numeric value must be finite and
 greater than zero.
 
 The scale reference is the nearest open path to the annotation. Exactly one
@@ -99,6 +120,8 @@ The scale path is metadata and is not emitted as a panel.
 All JSON coordinates and lengths use meters. The conversion factor is:
 
 `meters_per_svg_unit = annotation_centimeters / 100 / scale_path_svg_length`
+
+PDF scale is defined directly by points as described in section 3.1.
 
 ## 5. Coordinates
 
@@ -232,9 +255,9 @@ Numbers must be finite JSON numbers. The output contains no NaN or Infinity.
 
 The Yohsai N-panel exposes:
 
-- `SVG Path`: a file selector for an SVG document;
-- `Load`: parse the SVG and create separate cloth-part objects;
-- `Update`: recut the selected Clothes collection from the same saved SVG;
+- `Pattern Path`: a file selector for a PDF or SVG document;
+- `Load`: parse the pattern and create separate cloth-part objects;
+- `Update`: recut the selected Clothes collection from the same saved file;
 - `Clothes`: the loaded numbered collection used by later actions;
 - `Sewing`: build the combined sewn preview after manual part placement;
 - `Body`: select the fixed collision mesh used by Kitsuke;
@@ -350,16 +373,16 @@ changed in the pattern and loaded as a new clothes collection. The Body is
 constant after its first evaluated snapshot. Runtime velocity is not persisted
 across reopening a Blender file.
 
-Version 0.1.10 temporarily exposes gravity and seam closure in the N-panel; their
+Version 0.1.11 temporarily exposes gravity and seam closure in the N-panel; their
 current values are read on every click without reconstructing the session.
 
 Taichi selects an available GPU architecture automatically and uses an explicit
-CPU fallback when GPU initialization fails. The 0.1.10 package supplies Windows
+CPU fallback when GPU initialization fails. The 0.1.11 package supplies Windows
 x64 CPython 3.13 wheels.
 
 ## 13. Update
 
-Update rereads the same absolute SVG path that created the selected Clothes
+Update rereads the same absolute PDF or SVG path that created the selected Clothes
 collection. The number and normalized set of `#`-labeled panel objects must be
 unchanged. The operation generates entirely new panel meshes; vertex and face
 counts may differ.

@@ -1,4 +1,4 @@
-# Yohsai 0.1.10
+# Yohsai 0.1.11
 
 Yohsai is a public, in-development Blender extension for clothing construction.
 The API, data shape, and generated output are still experimental.
@@ -26,12 +26,18 @@ The exporter writes two Adobe Illustrator-readable SVG files:
 SVG dimensions are written in millimeters. Yohsai converts Blender world units
 through the scene unit scale, so the path keeps real size for pattern drafting.
 
-## Pattern SVG Load
+## Pattern PDF / SVG Load
 
-The `SVG Path` and `Load` controls start a standalone, standard-library-only
-parser in Blender's bundled Python. The Blender UI remains responsive while the
-parser converts the exact `CLOTHES` layer into a fixed, atomically replaced JSON
-document in Blender's private Yohsai data directory. Blender then expands `@W`
+The `Pattern Path` and `Load` controls accept Adobe Illustrator PDF or SVG.
+PDF is preferred because Illustrator can rewrite SVG layer IDs when reopening a
+file. In PDF, Yohsai imports closed paths that contain a unique `#` panel label;
+unlabeled artwork such as the body silhouette is ignored. SVG remains supported
+through its exact `CLOTHES` layer.
+
+The standalone parser runs asynchronously with Blender's bundled Python and
+writes a fixed, atomically replaced JSON document in Blender's private Yohsai
+data directory. PDF parsing uses the bundled `pypdf` and `typing_extensions`
+wheels. Blender then expands `@W`
 fold panels, creates an approximately 1 cm constrained triangular mesh for each
 closed pattern panel, and packs the separate objects into one numbered
 `CLOTHES_###` collection at Y = -1 m. Sewing labels and fold edges are retained
@@ -47,7 +53,7 @@ This step does not add a Cloth modifier.
 Place one unique `#` text label inside every closed pattern panel, for example
 `#FRONT01` or `#BACK-BODICE`. Label whitespace is removed, ASCII letter case is
 ignored, and digits, underscore, and hyphen are supported. After changing and
-saving the same Illustrator SVG, press `Update` instead of Load.
+saving the same Illustrator PDF or SVG, press `Update` instead of Load.
 
 Update recuts every labeled panel into new mesh data and transfers the old
 garment's current 3D pose as an initial placement. Existing panel objects,
@@ -71,7 +77,7 @@ restores every pattern panel as a separate object. Move and rotate any one or
 more panels in Object Mode, press `Kitsuke` again, and repeat while the seams
 close and the garment approaches the body.
 
-Version 0.1.10 temporarily exposes `Gravity` in m/s² and `Seam Pull` in
+Version 0.1.11 temporarily exposes `Gravity` in m/s² and `Seam Pull` in
 mm/click in the N-panel for empirical tuning. Changes take effect on the next
 Kitsuke click without rebuilding the session.
 
@@ -82,7 +88,7 @@ evaluated once on the first step and remains a fixed collider. Body/cloth and
 cloth/cloth contact thickness is 2 mm, while paired seam points target 0 mm.
 
 Taichi chooses an available GPU backend automatically and falls back to the CPU
-only when no GPU backend initializes. Version 0.1.10 bundles the CPython 3.13
+only when no GPU backend initializes. Version 0.1.11 bundles the CPython 3.13
 Windows x64 wheels and is packaged for Windows x64.
 
 The input and JSON contracts are documented in `SVG_TO_JSON_SPEC.md`.

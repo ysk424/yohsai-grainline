@@ -634,6 +634,300 @@ def parse_svg(svg_path: str | os.PathLike[str]) -> dict[str, object]:
     return document
 
 
+_PDF_METERS_PER_POINT = 0.0254 / 72.0
+_PDF_PATH_PAINT = {b"S", b"s", b"f", b"F", b"f*", b"B", b"B*", b"b", b"b*"}
+
+
+def _pdf_matrix(values: object) -> Matrix:
+    try:
+        numbers = [float(value) for value in values]
+    except (TypeError, ValueError) as exc:
+        raise ParseError("PDF contains an invalid transformation matrix.") from exc
+    if len(numbers) != 6 or not all(math.isfinite(value) for value in numbers):
+        raise ParseError("PDF contains an invalid transformation matrix.")
+    return Matrix(*numbers)
+
+
+def _pdf_point(ctm: Matrix, x: object, y: object) -> Point:
+    try:
+        transformed = ctm.apply(Point(float(x), float(y)))
+    except (TypeError, ValueError) as exc:
+        raise ParseError("PDF contains an invalid coordinate.") from exc
+    return Point(transformed.x, -transformed.y)
+
+
+def _pdf_decode_string(value: object, font: object | None) -> str:
+    text = str(value)
+    if font is None or str(font.get("/Encoding", "")) != "/Identity-H" or font.get("/ToUnicode") is not None:
+        return text
+    raw = getattr(value, "original_bytes", None)
+    if not isinstance(raw, bytes) or len(raw) % 2:
+        return text
+    result: list[str] = []
+    for index in range(0, len(raw), 2):
+        cid = int.from_bytes(raw[index:index + 2], "big")
+        result.append(chr(cid + 31) if 1 <= cid <= 95 else "\ufffd")
+    return "".join(result)
+
+
+def _pdf_collect_content(
+    owner: object,
+    reader: object,
+    inherited: Matrix,
+    paths: list[Subpath],
+    annotations: list[Annotation],
+) -> None:
+    try:
+        from pypdf.generic import ContentStream
+    except ImportError as exc:
+        raise ParseError("PDF input requires the bundled pypdf package.") from exc
+
+    resources = owner.get("/Resources", {})
+    contents = owner.get("/Contents") if str(owner.get("/Type", "")) == "/Page" else owner
+    if contents is None:
+        return
+    stream = ContentStream(contents, reader)
+    ctm = inherited
+    graphics_stack: list[Matrix] = []
+    pending: list[Subpath] = []
+    current: Subpath | None = None
+    current_point: Point | None = None
+    start_point: Point | None = None
+    text_matrix = Matrix()
+    text_line_matrix = Matrix()
+    current_font = None
+
+    def finish_open_subpath() -> None:
+        nonlocal current, current_point, start_point
+        if current is not None and current.segments:
+            pending.append(current)
+        current = None
+        current_point = None
+        start_point = None
+
+    def begin(point: Point) -> None:
+        nonlocal current, current_point, start_point
+        finish_open_subpath()
+        current = Subpath([], False)
+        current_point = point
+        start_point = point
+
+    def line_to(point: Point) -> None:
+        nonlocal current_point
+        if current is None or current_point is None:
+            raise ParseError("PDF path draws a line before a move operation.")
+        current.segments.append(Segment("line", current_point, point))
+        current_point = point
+
+    def cubic_to(control1: Point, control2: Point, point: Point) -> None:
+        nonlocal current_point
+        if current is None or current_point is None:
+            raise ParseError("PDF path draws a curve before a move operation.")
+        current.segments.append(Segment("cubic", current_point, point, control1, control2))
+        current_point = point
+
+    def close_current() -> None:
+        nonlocal current, current_point
+        if current is None or current_point is None or start_point is None:
+            raise ParseError("PDF closes a path before a move operation.")
+        if _distance(current_point, start_point) > 1.0e-9:
+            current.segments.append(Segment("line", current_point, start_point))
+        current.closed = True
+        pending.append(current)
+        current = None
+        current_point = None
+
+    def emit_text(operands: object) -> None:
+        pieces: list[str] = []
+        values = operands[0] if operands else []
+        if not isinstance(values, list):
+            values = [values]
+        for value in values:
+            if isinstance(value, (int, float)):
+                continue
+            pieces.append(_pdf_decode_string(value, current_font))
+        text = "".join(pieces).strip()
+        if text:
+            origin_matrix = ctm @ text_matrix
+            annotations.append(Annotation(text, _pdf_point(origin_matrix, 0.0, 0.0)))
+
+    for operands, operator in stream.operations:
+        if operator == b"q":
+            graphics_stack.append(ctm)
+        elif operator == b"Q":
+            if not graphics_stack:
+                raise ParseError("PDF graphics-state stack is unbalanced.")
+            ctm = graphics_stack.pop()
+        elif operator == b"cm":
+            ctm = ctm @ _pdf_matrix(operands)
+        elif operator == b"m":
+            begin(_pdf_point(ctm, operands[0], operands[1]))
+        elif operator == b"l":
+            line_to(_pdf_point(ctm, operands[0], operands[1]))
+        elif operator == b"c":
+            cubic_to(
+                _pdf_point(ctm, operands[0], operands[1]),
+                _pdf_point(ctm, operands[2], operands[3]),
+                _pdf_point(ctm, operands[4], operands[5]),
+            )
+        elif operator == b"v":
+            if current_point is None:
+                raise ParseError("PDF path draws a curve before a move operation.")
+            cubic_to(current_point, _pdf_point(ctm, operands[0], operands[1]), _pdf_point(ctm, operands[2], operands[3]))
+        elif operator == b"y":
+            endpoint = _pdf_point(ctm, operands[2], operands[3])
+            cubic_to(_pdf_point(ctm, operands[0], operands[1]), endpoint, endpoint)
+        elif operator == b"h":
+            close_current()
+        elif operator == b"re":
+            x, y, width, height = (float(value) for value in operands)
+            begin(_pdf_point(ctm, x, y))
+            line_to(_pdf_point(ctm, x + width, y))
+            line_to(_pdf_point(ctm, x + width, y + height))
+            line_to(_pdf_point(ctm, x, y + height))
+            close_current()
+        elif operator in _PDF_PATH_PAINT:
+            finish_open_subpath()
+            paths.extend(pending)
+            pending.clear()
+        elif operator == b"n":
+            current = None
+            current_point = None
+            start_point = None
+            pending.clear()
+        elif operator == b"BT":
+            text_matrix = Matrix()
+            text_line_matrix = Matrix()
+            current_font = None
+        elif operator == b"Tf":
+            font_reference = resources.get("/Font", {}).get(operands[0])
+            current_font = font_reference.get_object() if font_reference is not None else None
+        elif operator == b"Tm":
+            text_matrix = _pdf_matrix(operands)
+            text_line_matrix = text_matrix
+        elif operator in {b"Td", b"TD"}:
+            text_line_matrix = text_line_matrix @ Matrix(e=float(operands[0]), f=float(operands[1]))
+            text_matrix = text_line_matrix
+        elif operator == b"T*":
+            text_matrix = text_line_matrix
+        elif operator in {b"Tj", b"TJ"}:
+            emit_text(operands)
+        elif operator == b"Do":
+            reference = resources.get("/XObject", {}).get(operands[0])
+            if reference is None:
+                continue
+            form = reference.get_object()
+            if str(form.get("/Subtype", "")) == "/Form":
+                form_matrix = _pdf_matrix(form.get("/Matrix", [1, 0, 0, 1, 0, 0]))
+                _pdf_collect_content(form, reader, ctm @ form_matrix, paths, annotations)
+
+
+def parse_pdf(path: str | os.PathLike[str]) -> dict[str, object]:
+    source_path = Path(path).resolve()
+    if not source_path.is_file():
+        raise ParseError(f"PDF file does not exist: {source_path}")
+    if source_path.suffix.lower() != ".pdf":
+        raise ParseError("Input file must have a .pdf extension.")
+    try:
+        from pypdf import PdfReader
+    except ImportError as exc:
+        raise ParseError("PDF input requires the bundled pypdf package.") from exc
+    try:
+        reader = PdfReader(source_path)
+    except Exception as exc:
+        raise ParseError(f"Cannot read PDF: {exc}") from exc
+    if len(reader.pages) != 1:
+        raise ParseError(f"Yohsai PDF input must contain exactly one page; found {len(reader.pages)}.")
+
+    paths: list[Subpath] = []
+    annotations: list[Annotation] = []
+    _pdf_collect_content(reader.pages[0], reader, Matrix(), paths, annotations)
+    records = [
+        PathRecord(None, [subpath], index)
+        for index, subpath in enumerate(paths)
+        if subpath.closed
+    ]
+    all_panels, _open = _make_panels(records)
+    command_annotations = [
+        annotation
+        for annotation in annotations
+        if (normalized := "".join(annotation.text.split()))
+        and (normalized.startswith("#") or normalized.startswith("@") or _SEW_RE.fullmatch(normalized))
+    ]
+    panel_label_annotations = _assign_panel_labels(command_annotations, all_panels)
+    panels = [panel for panel in all_panels if panel.update_label is not None]
+    if not panels:
+        raise ParseError("PDF contains no closed panel with an internal # label.")
+
+    scale_annotations = [annotation for annotation in command_annotations if _SCALE_RE.fullmatch(annotation.text)]
+    if len(scale_annotations) != 1:
+        raise ParseError(f"Expected exactly one @S<number>cm annotation; found {len(scale_annotations)}.")
+    scale_annotation = scale_annotations[0]
+    scale_match = _SCALE_RE.fullmatch(scale_annotation.text)
+    assert scale_match is not None
+    reference_centimeters = float(scale_match.group(1))
+
+    sewing_groups: dict[str, list[dict[str, object]]] = {}
+    for annotation in command_annotations:
+        if annotation in panel_label_annotations or annotation is scale_annotation:
+            continue
+        normalized = annotation.text.strip().upper()
+        panel, segment_index, segment = _nearest_panel_segment(annotation, panels)
+        if normalized == "@W":
+            segment.fold = True
+        elif _SEW_RE.fullmatch(normalized):
+            if segment.sewing_group is not None and segment.sewing_group != normalized:
+                raise ParseError(
+                    f"Panel {panel.panel_id!r} segment {segment_index} has conflicting sewing markers."
+                )
+            segment.sewing_group = normalized
+            sewing_groups.setdefault(normalized, []).append({"panel": panel.panel_id, "segment": segment_index})
+        elif normalized.startswith("@"):
+            raise ParseError(f"Unsupported PDF annotation {annotation.text!r}.")
+
+    document: dict[str, object] = {
+        "schema": SCHEMA_NAME,
+        "version": SCHEMA_VERSION,
+        "source": {
+            "svg_path": source_path.as_posix(),
+            "clothes_layer": "PDF # labeled panels",
+            "input_format": "pdf",
+        },
+        "units": "m",
+        "scale": {
+            "annotation": scale_annotation.text.strip(),
+            "reference_length_m": _clean_float(reference_centimeters / 100.0),
+            "reference_length_svg": _clean_float(reference_centimeters / 100.0 / _PDF_METERS_PER_POINT),
+            "meters_per_svg_unit": _clean_float(_PDF_METERS_PER_POINT),
+        },
+        "panels": [
+            {
+                "id": panel.panel_id,
+                "label": panel.update_label,
+                "source_path_id": None,
+                "closed": True,
+                "segments": [
+                    _serialize_segment(segment, index, _PDF_METERS_PER_POINT)
+                    for index, segment in enumerate(panel.segments)
+                ],
+            }
+            for panel in panels
+        ],
+        "sewing_groups": sewing_groups,
+    }
+    json.dumps(document, allow_nan=False)
+    return document
+
+
+def parse_pattern(path: str | os.PathLike[str]) -> dict[str, object]:
+    suffix = Path(path).suffix.lower()
+    if suffix == ".svg":
+        return parse_svg(path)
+    if suffix == ".pdf":
+        return parse_pdf(path)
+    raise ParseError("Pattern input must be an .svg or .pdf file.")
+
+
 def write_fixed_output(document: dict[str, object], directory: str | os.PathLike[str] = ".") -> Path:
     output_directory = Path(directory).resolve()
     output_directory.mkdir(parents=True, exist_ok=True)
@@ -658,13 +952,13 @@ def write_fixed_output(document: dict[str, object], directory: str | os.PathLike
 def main(argv: Iterable[str] | None = None) -> int:
     arguments = list(sys.argv[1:] if argv is None else argv)
     if len(arguments) != 1:
-        print("Usage: yohsai_svg_parser.py <absolute-svg-path>", file=sys.stderr)
+        print("Usage: yohsai_svg_parser.py <absolute-pattern.svg|pdf>", file=sys.stderr)
         return 2
     try:
-        document = parse_svg(arguments[0])
+        document = parse_pattern(arguments[0])
         output_path = write_fixed_output(document)
     except (ParseError, OSError, ValueError) as exc:
-        print(f"Yohsai SVG parse failed: {exc}", file=sys.stderr)
+        print(f"Yohsai pattern parse failed: {exc}", file=sys.stderr)
         return 1
     print(output_path)
     return 0
