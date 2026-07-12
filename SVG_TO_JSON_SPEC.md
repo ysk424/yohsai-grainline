@@ -1,11 +1,11 @@
-# Yohsai PDF/SVG-to-JSON Specification
+# Yohsai PDF-to-JSON Specification
 
 Status: implemented schema and Blender workflow contract
 Version: 1.0.0
 
 ## 1. Purpose
 
-Yohsai converts garment patterns authored in Adobe Illustrator from PDF or SVG into a
+Yohsai converts garment patterns authored in Adobe Illustrator from PDF into a
 single machine-readable JSON document. The converter is a standalone process.
 Blender starts it with a pattern path, waits asynchronously for it to finish, and
 then reads the resulting JSON. The converter does not import Blender modules or
@@ -20,10 +20,9 @@ define Blender operations that consume the preserved sewing metadata.
 
 - Program name: `yohsai_svg_parser.py`.
 - Runtime: the Python interpreter bundled with Blender, in a separate process.
-- Dependencies: Python standard library for SVG; bundled `pypdf` and
-  `typing_extensions` wheels for PDF.
+- Dependencies: bundled `pypdf` and `typing_extensions` wheels for PDF.
 - Command line: `python yohsai_svg_parser.py <absolute-pattern-path>`.
-- The PDF or SVG path is the only positional argument.
+- The PDF path is the only positional argument.
 - Working directory: Yohsai's private user data directory.
 - Fixed result name: `yohsai_pattern.json`.
 - Temporary result name: `yohsai_pattern.json.tmp`.
@@ -42,7 +41,7 @@ loads the JSON only after exit code `0`, and reports parser errors to the user.
 
 ### 3.1 PDF input profile
 
-PDF is the preferred Adobe Illustrator interchange format. Version 1 accepts
+PDF is the Adobe Illustrator interchange format. Version 1 accepts
 exactly one page and reads its standard page-content operators; Illustrator
 private editing data is not required. Explicitly closed paths containing a valid
 `#` text label are emitted as pattern panels. Unlabeled artwork is not emitted,
@@ -52,83 +51,26 @@ reference silhouettes do not participate and are safe to keep on the page.
 
 PDF line and cubic Bezier path operators are retained. The current parser
 requires an explicit `h` close-path operation; close-and-paint and implicit fill
-closure are not yet promoted to closed panels. Text annotations use the
-same `#`, `@W`, `@S<number>cm`, and single-letter sewing syntax as SVG. The
+closure are not yet promoted to closed panels. Text annotations use `#`, `@W`,
+and single-letter sewing syntax. The
 initial Illustrator compatibility profile also decodes its embedded
 Identity-H ASCII font convention when a ToUnicode map is absent.
 
 PDF coordinates are points and convert directly to meters with
-`0.0254 / 72`. The `@S` annotation remains mandatory as human-readable pattern
-metadata, but PDF does not require a separate scale-reference line. Page Y is
+`0.0254 / 72`. `@S` scale annotations are obsolete and rejected. Page Y is
 flipped into Yohsai's upward-positive pattern coordinates.
 
 ### 3.2 SVG input profile
 
-#### 3.2.1 Data layer
+SVG input is no longer supported. The public parser rejects `.svg` files and
+direct `parse_svg` calls.
 
-Only the SVG group whose exact `id` is `CLOTHES` contains pattern data. All
-content outside that group is ignored. A missing layer, more than one matching
-layer, or a misspelling such as `CLITHES` is an error.
+## 4. Scale
 
-Nested groups in `CLOTHES` are allowed. SVG transforms inherited from those
-groups and transforms on supported elements are applied before measurements and
-output.
+All JSON coordinates and lengths use meters. PDF scale is defined directly by
+points as described in section 3.1:
 
-#### 3.2.2 Supported geometry
-
-The initial profile supports SVG `path` elements composed of:
-
-- `M`/`m` move commands;
-- `L`/`l`, `H`/`h`, and `V`/`v` straight segments;
-- `C`/`c` cubic Bezier segments;
-- `S`/`s` smooth cubic Bezier segments;
-- `Z`/`z` close commands.
-
-Straight segments are retained as straight segments. Cubic curves are retained
-as their exact endpoints and control points; they are not permanently converted
-to a sampled polyline. This lets Blender choose mesh resolution later without
-discarding the authored curve.
-
-Quadratic curves, elliptical arcs, and SVG geometry elements other than `path`
-are unsupported in `CLOTHES` and cause an error. An unsupported non-empty data
-element must never be silently ignored.
-
-Each closed subpath is one pattern panel. Multiple closed subpaths in one SVG
-path become separate panels. Open subpaths are not panels; in version 1 they may
-only serve as scale-reference lines.
-
-#### 3.2.3 Text annotations
-
-Annotation matching is case-insensitive and ignores surrounding whitespace.
-The initial profile recognizes:
-
-- `@S<number>cm`: scale reference, for example `@S99cm`;
-- `@W`: a fold/symmetry marker;
-- `#<label>`: a stable panel identity for Update;
-- a single ASCII letter `A` through `Z`: a sewing-group marker.
-
-Text may use `text`/`tspan` nesting. Its transformed SVG text origin is the
-annotation position. Empty Illustrator helper text is ignored. Any other
-non-empty text inside `CLOTHES` is an error.
-
-## 4. SVG scale
-
-For SVG, exactly one scale annotation is required. The numeric value must be finite and
-greater than zero.
-
-The scale reference is the nearest open path to the annotation. Exactly one
-open path must exist in the initial profile; absence or ambiguity is an error.
-The complete geometric length of that open path represents the annotated length.
-The scale path is metadata and is not emitted as a panel.
-
-All JSON coordinates and lengths use meters. The conversion factor is:
-
-`meters_per_svg_unit = annotation_centimeters / 100 / scale_path_svg_length`
-
-PDF scale is defined directly by points as described in section 3.1. The
-intended contract requires positive `@S` metadata. Version 0.2.0 still has a
-known validation gap for zero or negative PDF annotations; such input is
-unsupported even if the parser accepts it.
+`meters_per_svg_unit = 0.0254 / 72`
 
 ## 5. Coordinates
 
@@ -170,7 +112,7 @@ part of the stored value. ASCII letters compare case-insensitively and normalize
 to uppercase. ASCII letters, digits, underscore, and hyphen are accepted. Empty,
 invalid, or duplicate normalized labels are errors.
 
-ASCII-only labels are the contract. Version 0.2.0 has a known Python
+ASCII-only labels are the contract. Version 0.2.3 has a known Python
 case-insensitive-regex gap that may accept a small set of Unicode case-folding
 characters. Those accidental spellings are unsupported and must not be used.
 
@@ -200,10 +142,7 @@ The output is UTF-8 JSON with this top-level structure:
   },
   "units": "m",
   "scale": {
-    "annotation": "@S99cm",
-    "reference_length_m": 0.99,
-    "reference_length_svg": 1234.5,
-    "meters_per_svg_unit": 0.000801943
+    "meters_per_svg_unit": 0.00035277777777777776
   },
   "panels": [],
   "sewing_groups": {}
@@ -211,8 +150,7 @@ The output is UTF-8 JSON with this top-level structure:
 ```
 
 `source.svg_path` is a legacy field name retained for compatibility and stores
-the absolute source path for both PDF and SVG. PDF documents additionally set
-`source.input_format` to `pdf`; its absence currently means the SVG profile.
+the absolute source path. PDF documents set `source.input_format` to `pdf`.
 
 Each panel has an ID, optional normalized `label`, source path ID, `closed:
 true`, and an ordered `segments` array. A labeled panel begins:
@@ -272,7 +210,7 @@ Numbers must be finite JSON numbers. The output contains no NaN or Infinity.
 
 The Yohsai N-panel groups all inputs first:
 
-- `Pattern Path`: a file selector for a PDF or SVG document;
+- `Pattern Path`: a file selector for a PDF document;
 - `Clothes`: the loaded numbered collection used by later actions;
 - `Body`: select the fixed collision mesh used by Kitsuke.
 
@@ -332,7 +270,7 @@ Expanded panels are packed horizontally without overlap:
 - the combined bounds are centered at world `X = 0`;
 - face normals point toward world `-Y`.
 
-The original PDF/SVG panel-to-panel offsets are not used for this initial packing.
+The original PDF panel-to-panel offsets are not used for this initial packing.
 
 ### 10.5 Load versus Update
 
@@ -411,12 +349,12 @@ They are solver constants rather than pattern data and do not alter the JSON
 contract.
 
 Taichi selects an available GPU architecture automatically and uses an explicit
-CPU fallback when GPU initialization fails. The 0.2.0 package supplies Windows
+CPU fallback when GPU initialization fails. The 0.2.3 package supplies Windows
 x64 CPython 3.13 wheels.
 
 ## 13. Update
 
-Update rereads the same absolute PDF or SVG path that created the selected Clothes
+Update rereads the same absolute PDF path that created the selected Clothes
 collection. The number and normalized set of `#`-labeled panel objects must be
 unchanged. The operation generates entirely new panel meshes; vertex and face
 counts may differ.
@@ -445,7 +383,7 @@ verification; Kitsuke refuses with `Sewing required` until Sewing succeeds.
 ## 14. Future compatibility
 
 Future versions may add darts, notches, grain lines, seam order and direction,
-additional PDF/SVG primitives, error-checker interoperability, and richer
+additional PDF primitives, error-checker interoperability, and richer
 Blender geometry generation. Such additions require a schema-version change or
 backward-compatible optional fields. They must not silently reinterpret version
 1 data.

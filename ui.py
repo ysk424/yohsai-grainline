@@ -180,7 +180,7 @@ def _poll_svg_parser() -> float | None:
 class YohsaiProperties(PropertyGroup):
     svg_path: StringProperty(
         name="Pattern Path",
-        description="Adobe Illustrator PDF or SVG pattern file",
+        description="Adobe Illustrator PDF pattern file",
         subtype="FILE_PATH",
         default="",
     )
@@ -204,7 +204,7 @@ class YohsaiProperties(PropertyGroup):
 class YOHSAI_OT_load_svg(Operator):
     bl_idname = "yohsai.load_svg"
     bl_label = "Load"
-    bl_description = "Parse the selected Illustrator PDF or SVG and load its Yohsai JSON"
+    bl_description = "Parse the selected Illustrator PDF and load its Yohsai JSON"
     bl_options = {"REGISTER"}
 
     def execute(self, context):
@@ -215,11 +215,11 @@ class YOHSAI_OT_load_svg(Operator):
 
         raw_path = context.scene.yohsai.svg_path
         if not raw_path:
-            self.report({"ERROR"}, "Select a PDF or SVG pattern file first.")
+            self.report({"ERROR"}, "Select a PDF pattern file first.")
             return {"CANCELLED"}
         svg_path = str(Path(bpy.path.abspath(raw_path)).resolve())
-        if not os.path.isfile(svg_path) or Path(svg_path).suffix.lower() not in {".svg", ".pdf"}:
-            self.report({"ERROR"}, "Pattern Path must point to an existing .pdf or .svg file.")
+        if not os.path.isfile(svg_path) or Path(svg_path).suffix.lower() != ".pdf":
+            self.report({"ERROR"}, "Pattern Path must point to an existing .pdf file.")
             return {"CANCELLED"}
 
         parser_path = Path(__file__).with_name(_PARSER_FILENAME)
@@ -258,7 +258,7 @@ class YOHSAI_OT_load_svg(Operator):
 class YOHSAI_OT_update_svg(Operator):
     bl_idname = "yohsai.update_svg"
     bl_label = "Update"
-    bl_description = "Recut the selected Clothes collection from the saved PDF or SVG and transfer its current 3D placement"
+    bl_description = "Recut the selected Clothes collection from the saved PDF and transfer its current 3D placement"
     bl_options = {"REGISTER", "UNDO"}
 
     def execute(self, context):
@@ -273,11 +273,11 @@ class YOHSAI_OT_update_svg(Operator):
             return {"CANCELLED"}
         raw_path = props.svg_path
         if not raw_path:
-            self.report({"ERROR"}, "Select the original PDF or SVG file first.")
+            self.report({"ERROR"}, "Select the original PDF file first.")
             return {"CANCELLED"}
         svg_path = str(Path(bpy.path.abspath(raw_path)).resolve())
-        if not os.path.isfile(svg_path) or Path(svg_path).suffix.lower() not in {".svg", ".pdf"}:
-            self.report({"ERROR"}, "Pattern Path must point to the existing source .pdf or .svg file.")
+        if not os.path.isfile(svg_path) or Path(svg_path).suffix.lower() != ".pdf":
+            self.report({"ERROR"}, "Pattern Path must point to the existing source .pdf file.")
             return {"CANCELLED"}
         source_path = str(Path(str(collection.get("yohsai_source_svg", ""))).resolve())
         if os.path.normcase(svg_path) != os.path.normcase(source_path):

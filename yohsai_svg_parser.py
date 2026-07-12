@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-"""Standalone Illustrator PDF/SVG to Yohsai JSON converter.
+"""Standalone Illustrator PDF to Yohsai JSON converter.
 
-SVG parsing uses the Python standard library; PDF parsing uses bundled pypdf.
+PDF parsing uses bundled pypdf.
 Blender starts this module in a separate process, so it never imports bpy or
 shares Blender state.
 """
@@ -26,7 +26,7 @@ SCHEMA_VERSION = "1.0.0"
 
 
 class ParseError(ValueError):
-    """A PDF or SVG does not satisfy the Yohsai input profile."""
+    """A PDF does not satisfy the Yohsai input profile."""
 
 
 @dataclass(frozen=True)
@@ -530,6 +530,10 @@ def _serialize_segment(segment: Segment, index: int, scale: float) -> dict[str, 
 
 
 def parse_svg(svg_path: str | os.PathLike[str]) -> dict[str, object]:
+    raise ParseError("SVG input is no longer supported; use a PDF file.")
+
+
+def _parse_legacy_svg(svg_path: str | os.PathLike[str]) -> dict[str, object]:
     source_path = Path(svg_path).expanduser().resolve()
     if not source_path.is_file():
         raise ParseError(f"SVG file does not exist: {source_path}")
@@ -860,17 +864,9 @@ def parse_pdf(path: str | os.PathLike[str]) -> dict[str, object]:
     if not panels:
         raise ParseError("PDF contains no closed panel with an internal # label.")
 
-    scale_annotations = [annotation for annotation in command_annotations if _SCALE_RE.fullmatch(annotation.text)]
-    if len(scale_annotations) != 1:
-        raise ParseError(f"Expected exactly one @S<number>cm annotation; found {len(scale_annotations)}.")
-    scale_annotation = scale_annotations[0]
-    scale_match = _SCALE_RE.fullmatch(scale_annotation.text)
-    assert scale_match is not None
-    reference_centimeters = float(scale_match.group(1))
-
     sewing_groups: dict[str, list[dict[str, object]]] = {}
     for annotation in command_annotations:
-        if annotation in panel_label_annotations or annotation is scale_annotation:
+        if annotation in panel_label_annotations:
             continue
         normalized = annotation.text.strip().upper()
         panel, segment_index, segment = _nearest_panel_segment(annotation, panels)
@@ -896,9 +892,6 @@ def parse_pdf(path: str | os.PathLike[str]) -> dict[str, object]:
         },
         "units": "m",
         "scale": {
-            "annotation": scale_annotation.text.strip(),
-            "reference_length_m": _clean_float(reference_centimeters / 100.0),
-            "reference_length_svg": _clean_float(reference_centimeters / 100.0 / _PDF_METERS_PER_POINT),
             "meters_per_svg_unit": _clean_float(_PDF_METERS_PER_POINT),
         },
         "panels": [
@@ -922,11 +915,9 @@ def parse_pdf(path: str | os.PathLike[str]) -> dict[str, object]:
 
 def parse_pattern(path: str | os.PathLike[str]) -> dict[str, object]:
     suffix = Path(path).suffix.lower()
-    if suffix == ".svg":
-        return parse_svg(path)
     if suffix == ".pdf":
         return parse_pdf(path)
-    raise ParseError("Pattern input must be an .svg or .pdf file.")
+    raise ParseError("Pattern input must be a .pdf file.")
 
 
 def write_fixed_output(document: dict[str, object], directory: str | os.PathLike[str] = ".") -> Path:
@@ -953,7 +944,7 @@ def write_fixed_output(document: dict[str, object], directory: str | os.PathLike
 def main(argv: Iterable[str] | None = None) -> int:
     arguments = list(sys.argv[1:] if argv is None else argv)
     if len(arguments) != 1:
-        print("Usage: yohsai_svg_parser.py <absolute-pattern.svg|pdf>", file=sys.stderr)
+        print("Usage: yohsai_svg_parser.py <absolute-pattern.pdf>", file=sys.stderr)
         return 2
     try:
         document = parse_pattern(arguments[0])

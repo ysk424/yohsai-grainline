@@ -26,10 +26,9 @@ else:
     from yohsai.mesh_loader import MeshLoadError  # noqa: E402
 
 
-pdf_input = Path.home() / "Desktop" / "test2.pdf"
-svg_path = pdf_input if pdf_input.is_file() else Path.home() / "Desktop" / "test2.svg"
+svg_path = Path.home() / "Desktop" / "test2.pdf"
 if not svg_path.is_file():
-    raise RuntimeError("Missing integration input: Desktop/test2.pdf or Desktop/test2.svg")
+    raise RuntimeError("Missing integration input: Desktop/test2.pdf")
 
 if not installed_check:
     yohsai.register()

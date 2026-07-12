@@ -2,7 +2,7 @@
 
 Status: active implementation and empirical tuning  
 Recorded: 2026-07-11 (Asia/Tokyo)  
-Current tested package: Yohsai 0.2.0, Windows x64, Blender 5.2 / Python 3.13,
+Current tested package: Yohsai 0.2.3, Windows x64, Blender 5.2 / Python 3.13,
 Taichi 1.7.4
 
 ## 1. Product idea
@@ -90,6 +90,9 @@ data before another click.
 - Body contact thickness: 0.002 m.
 - Cloth self-contact thickness: 0.002 m.
 - Final paired seam distance: 0 m.
+- Seam closure has priority over Body and self-contact. If an undersized
+  garment cannot satisfy both collision and sewing, the accepted failure is
+  local cloth distortion or Body penetration, not a visible opened seam.
 - Seam vertices and their immediate connected neighborhoods are excluded from
   conflicting self-contact so paired seams may close to zero.
 - Body inside/outside is checked with majority parity over three non-axis-aligned
@@ -113,17 +116,25 @@ Implementation: `kitsuke.py`, Taichi PBD-style Jacobi constraints.
 | Time step | 1/240 s | Small-step stability |
 | Substeps per click | 16 | About 1/15 s simulated per click |
 | Constraint iterations per substep | 1 | Small Steps strategy |
+| Post-contact seam projection passes | 4 | Keeps closed seams from reopening after collision |
 | Default gravity magnitude | 1.0 m/s² | Interactive tuning value |
-| Default seam closure | 30 mm/click | Final target remains 0 mm |
+| Default seam closure | 30 mm/click | Seam maximum distance ratchets downward |
 | Velocity damping rate | 4.0/s | Quasi-static dressing bias |
 | Maximum velocity | 1.0 m/s | Sixteen substeps remain below the per-click displacement guard |
-| Maximum constraint correction | 2 mm/substep | Prevents seam/collision impulses |
+| Maximum constraint correction | 10 mm/substep | Allows stronger seam closure |
 | Maximum accepted click displacement | 0.1 m | Larger movement rolls back |
 | Collision broad-phase margin | 0.04 m | Reused during one click |
 
 The solver rolls back without writing Blender mesh data if positions or
 velocities become non-finite, or if any vertex moves more than 0.1 m in one
 click. The error reports the measured maximum displacement.
+
+Seam projection intentionally runs after Body and self-contact. This is a
+product rule, not a generic cloth-simulation default: Yohsai must preserve the
+pattern's sewn construction. When a garment is too small, failure should appear
+as local distortion, compression, or Body penetration near the seam rather than
+as the seam coming apart. Do not move Body collision back after seam projection
+unless the product rule is explicitly changed.
 
 ## 7. Former temporary N-panel tuning controls
 
@@ -226,6 +237,28 @@ runtime from the restored mesh and recovery data. Regression tests verify both
 click 1/click 2 restoration and repeating click 2 after Undo without skipping a
 30 mm seam-closure stage.
 
+### 0.2.3 seam-priority projection
+
+The 0.2.2 ratchet correctly stored seam maximum distances, including zero after
+a seam had fully closed, but Body and self-contact still ran after the sewing
+constraint and could visibly reopen a shoulder seam in the final displayed
+state. MCP inspection of a real shoulder case showed all stored seam maximum
+distances at 0 m while current distances reached about 12.7 mm, proving the
+problem was enforcement order rather than ratchet state.
+
+0.2.3 adds a dedicated post-contact seam projection pass. It is separate from
+the normal averaged stretch, bend, and collision corrections, and it runs four
+times after Body/self collision in every substep. The deliberate priority is:
+seams must stay sewn; if the garment is too small, deformation or penetration
+near the seam is preferable to an opened seam. This preserves the future path
+toward welded or topologically joined sewn meshes.
+
+The 2026-07-12 real-character shoulder retest produced a satisfactory result:
+the visible shoulder seam no longer became the failure point. This confirms the
+product priority that seams are more important than nearby cloth/body
+collision quality. Future solver changes must preserve this priority unless the
+construction model itself changes.
+
 ## 9. Known limitations
 
 - This is stabilized PBD, not a complete XPBD material model.
@@ -241,7 +274,7 @@ click 1/click 2 restoration and repeating click 2 after Undo without skipping a
   detected even though they are unsupported.
 - Live Taichi objects are not serialized. Blender stores only same-runtime
   Undo/Redo recovery data; cross-restart continuation is unsupported.
-- The bundled 0.2.0 distribution is Windows x64 / CPython 3.13.
+- The bundled 0.2.3 distribution is Windows x64 / CPython 3.13.
 - Taichi wheels make the extension archive approximately 85 MB.
 
 XPBD is a likely later improvement because compliance reduces dependence on
@@ -252,7 +285,7 @@ current interaction model rather than block tuning of the central workflow.
 
 When work resumes:
 
-1. Use `dist/yohsai-0.2.0.zip` unless a newer build exists.
+1. Use `dist/yohsai-0.2.3.zip` unless a newer build exists.
 2. Fully close Blender and Blender MCP before replacing the extension, because
    the loaded Taichi native library may lock its wheel files on Windows.
 3. Start from Load/Sewing after an extension or Blender restart; abandoned

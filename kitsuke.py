@@ -15,12 +15,13 @@ from .mesh_loader import SewingError, build_sewing_plan
 TIME_STEP = 1.0 / 240.0
 STEPS_PER_CLICK = 16
 SOLVER_ITERATIONS = 1
+SEAM_PROJECTION_PASSES = 4
 CONTACT_THICKNESS_M = 0.002
 COLLISION_SEARCH_M = 0.04
 DEFAULT_SEAM_CLOSURE_PER_CLICK_M = 0.030
 VELOCITY_DAMPING_PER_SECOND = 4.0
 MAX_SPEED_M_PER_SECOND = 1.0
-MAX_CONSTRAINT_CORRECTION_M = 0.002
+MAX_CONSTRAINT_CORRECTION_M = 0.010
 MAX_DISPLACEMENT_PER_CLICK_M = 0.1
 DEFAULT_GRAVITY_M_PER_SECOND_SQUARED = 1.0
 
@@ -441,6 +442,8 @@ def _create_runtime_type(ti):
             self.velocity = ti.Vector.field(3, dtype=ti.f32, shape=self.vertex_count)
             self.delta = ti.Vector.field(3, dtype=ti.f32, shape=self.vertex_count)
             self.count = ti.field(dtype=ti.i32, shape=self.vertex_count)
+            self.seam_delta = ti.Vector.field(3, dtype=ti.f32, shape=self.vertex_count)
+            self.seam_count = ti.field(dtype=ti.i32, shape=self.vertex_count)
             self.edges = ti.Vector.field(2, dtype=ti.i32, shape=len(edges))
             self.edge_rest = ti.field(dtype=ti.f32, shape=len(edges))
             self.bends = ti.Vector.field(2, dtype=ti.i32, shape=max(len(bends), 1))
@@ -485,6 +488,12 @@ def _create_runtime_type(ti):
                 self.delta[index] = ti.Vector.zero(ti.f32, 3)
                 self.count[index] = 0
 
+        @ti.kernel
+        def clear_seam_projection(self):
+            for index in range(self.vertex_count):
+                self.seam_delta[index] = ti.Vector.zero(ti.f32, 3)
+                self.seam_count[index] = 0
+
         @ti.func
         def add_distance(self, a: ti.i32, b: ti.i32, rest: ti.f32, stiffness: ti.f32):
             difference = self.x[b] - self.x[a]
@@ -499,6 +508,32 @@ def _create_runtime_type(ti):
                 ti.atomic_add(self.count[a], 1)
                 ti.atomic_add(self.count[b], 1)
 
+        @ti.func
+        def add_max_distance(self, a: ti.i32, b: ti.i32, max_length: ti.f32, stiffness: ti.f32):
+            difference = self.x[b] - self.x[a]
+            length = difference.norm()
+            if length > max_length and length > 1.0e-8:
+                magnitude = (length - max_length) * (0.5 * stiffness)
+                magnitude = ti.min(MAX_CONSTRAINT_CORRECTION_M, magnitude)
+                correction = difference * (magnitude / length)
+                for axis in ti.static(range(3)):
+                    ti.atomic_add(self.delta[a][axis], correction[axis])
+                    ti.atomic_add(self.delta[b][axis], -correction[axis])
+                ti.atomic_add(self.count[a], 1)
+                ti.atomic_add(self.count[b], 1)
+
+        @ti.func
+        def add_seam_projection(self, a: ti.i32, b: ti.i32, max_length: ti.f32):
+            difference = self.x[b] - self.x[a]
+            length = difference.norm()
+            if length > max_length and length > 1.0e-8:
+                correction = difference * (((length - max_length) * 0.5) / length)
+                for axis in ti.static(range(3)):
+                    ti.atomic_add(self.seam_delta[a][axis], correction[axis])
+                    ti.atomic_add(self.seam_delta[b][axis], -correction[axis])
+                ti.atomic_add(self.seam_count[a], 1)
+                ti.atomic_add(self.seam_count[b], 1)
+
         @ti.kernel
         def distance_corrections(self):
             for index in self.edges:
@@ -509,12 +544,25 @@ def _create_runtime_type(ti):
                 self.add_distance(pair[0], pair[1], self.bend_rest[index], 0.08)
             for index in self.seams:
                 pair = self.seams[index]
-                self.add_distance(pair[0], pair[1], self.seam_rest[index], 0.85)
+                self.add_max_distance(pair[0], pair[1], self.seam_rest[index], 0.85)
+
+        @ti.kernel
+        def seam_projection_corrections(self):
+            for index in self.seams:
+                pair = self.seams[index]
+                self.add_seam_projection(pair[0], pair[1], self.seam_rest[index])
 
         @ti.kernel
         def tighten_seams(self, amount: ti.f32):
             for index in self.seams:
                 self.seam_rest[index] = ti.max(0.0, self.seam_rest[index] - amount)
+
+        @ti.kernel
+        def ratchet_seams(self):
+            for index in self.seams:
+                pair = self.seams[index]
+                difference = self.x[pair[1]] - self.x[pair[0]]
+                self.seam_rest[index] = ti.min(self.seam_rest[index], difference.norm())
 
         @ti.kernel
         def replace_seam_state(self, values: ti.types.ndarray(dtype=ti.f32, ndim=1)):
@@ -526,6 +574,12 @@ def _create_runtime_type(ti):
             for index in range(self.vertex_count):
                 if self.count[index] > 0:
                     self.x[index] += self.delta[index] / ti.cast(self.count[index], ti.f32)
+
+        @ti.kernel
+        def apply_seam_projection(self):
+            for index in range(self.vertex_count):
+                if self.seam_count[index] > 0:
+                    self.x[index] += self.seam_delta[index] / ti.cast(self.seam_count[index], ti.f32)
 
         @ti.func
         def closest_triangle_point(self, point, a, b, c):
@@ -622,8 +676,10 @@ def _create_runtime_type(ti):
 
         def advance(self, body_candidates, self_candidates, gravity_magnitude, seam_closure):
             self.tighten_seams(seam_closure)
+            self.ratchet_seams()
             for _step in range(STEPS_PER_CLICK):
                 self.integrate(TIME_STEP, gravity_magnitude)
+                self.ratchet_seams()
                 for _iteration in range(SOLVER_ITERATIONS):
                     self.clear_corrections()
                     self.distance_corrections()
@@ -634,6 +690,11 @@ def _create_runtime_type(ti):
                     if len(self_candidates):
                         self.self_collisions(self_candidates, len(self_candidates))
                     self.apply_corrections()
+                    for _pass in range(SEAM_PROJECTION_PASSES):
+                        self.clear_seam_projection()
+                        self.seam_projection_corrections()
+                        self.apply_seam_projection()
+                    self.ratchet_seams()
                 self.update_velocities(TIME_STEP)
 
         def state(self):

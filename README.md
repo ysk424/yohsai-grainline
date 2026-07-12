@@ -1,4 +1,4 @@
-# Yohsai 0.2.0
+# Yohsai 0.2.3
 
 Yohsai is a public, in-development Blender extension for clothing construction.
 The API, data shape, and generated output are still experimental.
@@ -12,7 +12,7 @@ intentionally concentrated into four operations:
 
 The top of the Yohsai N-panel contains all three inputs:
 
-- `Pattern Path`: the current Illustrator PDF or SVG;
+- `Pattern Path`: the current Illustrator PDF;
 - `Clothes`: the loaded Yohsai clothes collection;
 - `Body`: the fixed collision mesh used by Kitsuke.
 
@@ -31,14 +31,12 @@ SVG dimensions are written in millimeters. Yohsai converts Blender world units
 through the scene unit scale, so the path keeps real size for pattern drafting.
 Complete instructions are in `UTIL/README.md`.
 
-## Pattern PDF / SVG Load
+## Pattern PDF Load
 
-The `Pattern Path` and `Load` controls accept Adobe Illustrator PDF or SVG.
-PDF is preferred because Illustrator can rewrite SVG layer IDs when reopening a
-file. In PDF, Yohsai emits closed paths that contain a unique `#` panel label as
-panels. Unlabeled artwork is not emitted, subject to the containment limitation
-recorded in `SVG_TO_JSON_SPEC.md`. SVG remains supported through its exact
-`CLOTHES` layer.
+The `Pattern Path` and `Load` controls accept Adobe Illustrator PDF. Yohsai
+emits closed paths that contain a unique `#` panel label as panels. Unlabeled
+artwork is not emitted, subject to the containment limitation recorded in
+`SVG_TO_JSON_SPEC.md`. SVG input is no longer supported.
 
 The standalone parser runs asynchronously with Blender's bundled Python and
 writes a fixed, atomically replaced JSON document in Blender's private Yohsai
@@ -59,7 +57,7 @@ This step does not add a Cloth modifier.
 Place one unique `#` text label inside every closed pattern panel, for example
 `#FRONT01` or `#BACK-BODICE`. Label whitespace is removed, ASCII letter case is
 ignored, and digits, underscore, and hyphen are supported. After changing and
-saving the same Illustrator PDF or SVG, press `Update` instead of Load.
+saving the same Illustrator PDF, press `Update` instead of Load.
 
 Update recuts every labeled panel into new mesh data and transfers the old
 garment's current 3D pose as an initial placement. Existing panel objects,
@@ -76,8 +74,11 @@ continuing.
 
 After inspecting the `Sewing` preview, select a fixed mesh `Body` and press
 `Kitsuke`. Yohsai constructs a transient Taichi session and advances sixteen
-1/240-second cloth steps. Each click shortens the transient seam
-targets by 30 mm. Kitsuke defaults to 1.0 m/s² downward acceleration so the user has time
+1/240-second cloth steps. Each click shortens the transient seam maximum
+distance by 30 mm, and every simulation cycle ratchets that maximum down to the
+current seam distance when the seam gets shorter. Seam projection runs after
+Body and self-contact so conflict is resolved by cloth distortion or Body
+penetration before seam separation. Kitsuke defaults to 1.0 m/s² downward acceleration so the user has time
 to reposition parts between clicks. Yohsai then removes the combined preview and
 restores every pattern panel as a separate object. Move and rotate any one or
 more panels in Object Mode, press `Kitsuke` again, and repeat while the seams
@@ -100,7 +101,7 @@ recovery state. Continuing an abandoned, partially dressed session across a
 restart is not supported; begin again from Load/Sewing when required.
 
 Taichi chooses an available GPU backend automatically and falls back to the CPU
-only when no GPU backend initializes. Version 0.2.0 bundles the CPython 3.13
+only when no GPU backend initializes. Version 0.2.3 bundles the CPython 3.13
 Windows x64 wheels and is packaged for Windows x64.
 
 The input and JSON contracts are documented in `SVG_TO_JSON_SPEC.md`.

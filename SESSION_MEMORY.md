@@ -2,11 +2,11 @@
 
 Status: authoritative handoff for the next Codex session  
 Recorded: 2026-07-11 (Asia/Tokyo)  
-Release prepared today: Yohsai 0.2.0
+Release prepared today: Yohsai 0.2.3
 
 ## Product viewpoint that must not drift
 
-Yohsai is pattern-designer software. The Illustrator PDF/SVG pattern owns the
+Yohsai is pattern-designer software. The Illustrator PDF pattern owns the
 cloth pieces, dimensions, labels, sewing connectivity, and future construction
 annotations. Blender meshes and simulation state are replaceable realizations.
 Update means recutting revised cloth, transferring the old 3D pose only as a
@@ -24,7 +24,7 @@ production UI controls.
 
 ## Working workflow
 
-1. Save the annotated Illustrator PDF (preferred) or compatible SVG.
+1. Save the annotated Illustrator PDF.
 2. Load it; Yohsai creates separate packed panel objects.
 3. Translate and rotate panels in Object Mode.
 4. Run Sewing and visually verify connectivity.
@@ -34,8 +34,21 @@ production UI controls.
    when the authored sewing signature changed.
 
 Current tested solver values are 16 substeps at 1/240 s, Gravity 1.0 m/s²,
-Seam Pull 30 mm/click, bend stiffness 0.08, stretch stiffness 0.95, maximum
-speed 1.0 m/s, and 2 mm contact thickness.
+Seam Pull 30 mm/click, ratcheting seam maximum-distance constraints, four
+post-contact seam projection passes, bend stiffness 0.08, stretch stiffness
+0.95, maximum speed 1.0 m/s, maximum constraint correction 10 mm/substep, and
+2 mm contact thickness.
+
+Important design rule: visible seam opening is the unacceptable failure mode.
+When a garment is too small or Body collision conflicts with sewing, Yohsai
+prefers local cloth distortion or Body penetration over a seam coming apart.
+This is intentional because future versions are expected to weld or otherwise
+topologically connect sewn seams.
+
+2026-07-12 real-character retest: the 0.2.3 seam-priority projection produced a
+satisfactory shoulder result and resolved the visible seam-opening failure. Keep
+this rule explicit; generic cloth-simulation instincts may otherwise move
+collision resolution back after sewing and reintroduce the problem.
 
 ## 0.2.0 Undo/Redo design
 
@@ -68,14 +81,13 @@ Tests:
 ## Current supported input
 
 The real integration input is `C:\Users\azoo\Desktop\test2.pdf`. It currently
-produces two labeled panels (`OMOTE`, `URA`) and sewing groups A/B. PDF is
-preferred because Illustrator rewrites SVG layer IDs. Bundled dependencies are
+produces two labeled panels (`OMOTE`, `URA`) and sewing groups A/B. Bundled dependencies are
 Taichi 1.7.4, pypdf 6.14.2, and their listed wheels for Blender 5.2 / CPython
 3.13 on Windows x64.
 
 ## Explicitly deferred issues
 
-These were reviewed on 2026-07-11 and intentionally not fixed in 0.2.0:
+These were reviewed on 2026-07-11 and intentionally not fixed in 0.2.3:
 
 - direct vertex edits and same-vertex-count topology changes are unsupported but
   not fully detected by Kitsuke;
@@ -84,9 +96,7 @@ These were reviewed on 2026-07-11 and intentionally not fixed in 0.2.0:
 - PDF close-and-paint and implicit fill closure are not recognized as explicit
   closed panels;
 - the ASCII label regex accidentally accepts a few Unicode case-folding
-  characters;
-- PDF `@S0cm` and negative `@S` metadata lack the intended positive-value
-  validation.
+  characters.
 
 Do not reinterpret these accidental acceptances as product requirements.
 
@@ -108,4 +118,4 @@ continuous-collision strategy is the next substantial solver task.
 5. Run both Blender integration scripts against the installed extension.
 6. Confirm `git status --short` is empty, then commit and push `main`.
 
-The expected archive for this handoff is `dist/yohsai-0.2.0.zip`.
+The expected archive for this handoff is `dist/yohsai-0.2.3.zip`.
