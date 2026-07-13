@@ -91,9 +91,10 @@ of a closed panel. Every segment bearing the same case-normalized letter belongs
 to the same sewing group. A group may contain separated segments, including
 future dart-like arrangements.
 
-Version 1 records group membership only. It does not infer pairing order,
-stitching direction, easing, or compatibility of segment lengths. An exact
-distance tie is an ambiguity error.
+On a panel containing two `RING` edges, a sewing marker extends across the
+complete boundary arc between those edges that contains the marked segment.
+This permits one marker to describe a multi-segment closed sleeve armhole.
+An exact distance tie is an ambiguity error.
 
 ### 6.2 Fold marker
 
@@ -115,6 +116,19 @@ invalid, or duplicate normalized labels are errors.
 ASCII-only labels are the contract. Version 0.2.6 has a known Python
 case-insensitive-regex gap that may accept a small set of Unicode case-folding
 characters. Those accidental spellings are unsupported and must not be used.
+
+### 6.4 Mirror and RING construction
+
+`@M` and `@TOP` belong to the one labeled panel containing their text origin.
+`@M` creates two instances at Load: the authored geometry is LEFT and its
+reflection is RIGHT. A panel may contain at most one `@M`.
+
+`RING` is a reserved construction word, not a sewing variable. Exactly two
+RING annotations associate with their nearest boundary segments. `@TOP` is
+required on that panel and selects the circumferential location that maps to
+maximum world Z after Load wraps and welds the panel into a tube. RING cannot
+share a segment with `@W` or a sewing letter, and RING construction cannot be
+combined with fold expansion on the same panel.
 
 ## 7. Panel and segment identity
 
@@ -161,6 +175,8 @@ true`, and an ordered `segments` array. A labeled panel begins:
   "label": "FRONT01",
   "source_path_id": "path123",
   "closed": true,
+  "mirror": false,
+  "top": null,
   "segments": []
 }
 ```
@@ -174,7 +190,8 @@ A straight segment is:
   "start": [0.0, -0.1],
   "end": [0.2, -0.1],
   "sewing_group": "A",
-  "fold": false
+  "fold": false,
+  "ring": false
 }
 ```
 
@@ -189,7 +206,8 @@ A cubic Bezier segment additionally preserves both controls:
   "control2": [0.24, -0.04],
   "end": [0.25, 0.0],
   "sewing_group": null,
-  "fold": false
+  "fold": false,
+  "ring": false
 }
 ```
 
@@ -241,7 +259,17 @@ welded along the fold to form one connected, symmetric piece of cloth. Sewing
 attributes on the authored half are copied to their mirrored boundary segments.
 The welded fold remains an internal constrained edge with a `fold` attribute.
 
-### 10.2 Triangulation
+### 10.2 Mirror and RING construction
+
+An `@M` panel produces LEFT and RIGHT part objects with stable instance IDs.
+For a RING panel, both construction edges are sampled to the same vertex count.
+The flat width between them becomes the tube circumference, `@TOP` fixes the
+upward radial direction, and corresponding RING vertices are topologically
+welded. The result is one connected annular mesh rather than two boundaries
+held together by sewing springs. The flat pattern edge lengths remain the
+stretch rest lengths; the constructed cylinder is the bend rest shape.
+
+### 10.3 Triangulation
 
 Bezier and line boundaries are sampled at no more than approximately `0.01 m`
 between boundary vertices. The interior is filled with a near-uniform constrained
@@ -252,32 +280,34 @@ edges, perform Sewing, or add a Blender Cloth modifier.
 Boundary edge attributes preserve sewing membership as Boolean mesh attributes
 named `sewing_<LABEL>`. Fold edges use the Boolean mesh attribute `fold`.
 
-### 10.3 Object and collection
+### 10.4 Object and collection
 
-Each closed panel from one JSON document becomes a separate Mesh object. The
+Each closed panel becomes a separate Mesh object, except that an `@M` panel
+becomes LEFT and RIGHT objects. The
 objects are placed in one newly created collection using the first available
 name in the sequence `CLOTHES_001`, `CLOTHES_002`, and so on. Part objects are
 named `<collection>_PART_001`, `<collection>_PART_002`, and so on. Existing
 Yohsai collections are never overwritten by `Load`.
 
-### 10.4 Initial placement
+### 10.5 Initial placement
 
 Expanded panels are packed horizontally without overlap:
 
-- every vertex has world `Y = -1.0 m`;
+- flat-panel vertices have world `Y = -1.0 m`; RING tubes are centered there;
 - the lowest vertex has `Z = 0.01 m`;
 - adjacent panel bounds have a `0.10 m` horizontal gap;
 - the combined bounds are centered at world `X = 0`;
-- face normals point toward world `-Y`.
+- flat-panel face normals point toward world `-Y`; tube normals point outward.
 
 The original PDF panel-to-panel offsets are not used for this initial packing.
 
-### 10.5 Load versus Update
+### 10.6 Load versus Update
 
 `Load` always creates a new unused numbered collection. `Update` is the
 implemented recut workflow for an existing collection and is specified in
 section 13. The current Update scope requires the same panel-object count and
-normalized `#` label set, while triangulation and vertex counts may change.
+normalized `#` label and mirror-instance set, while triangulation and vertex
+counts may change.
 
 ## 11. Sewing
 
@@ -285,11 +315,16 @@ The user positions and rotates the separate part objects before pressing
 `Sewing`. Object world transforms at that moment are applied to the generated
 sewn mesh.
 
-For every sewing label, the marked boundary edges are split into connected,
-non-branching paths and ordered by mesh topology. A label must occur on exactly
-two different part objects. Sewing a part to itself, a missing partner, a label
-on more than two parts, a branched or closed sewing path, or unequal numbers of
-continuous paths is an error.
+For ordinary sewing labels, the marked boundary edges are split into connected,
+non-branching open paths and ordered by mesh topology. A label must occur on
+exactly two different part objects, with equal numbers of paths.
+
+RING sleeves add one deliberate exception. Each welded sleeve C is a closed
+path. For every such path, the same label must provide one open path on each of
+exactly two body part objects. Yohsai pairs the body paths by endpoint distance,
+joins them virtually into a closed front-plus-back path, and circularly aligns
+that composite path with the sleeve. With `@M`, this is performed independently
+for LEFT and RIGHT sleeves.
 
 When a label has multiple paths, Yohsai chooses the one-to-one path assignment
 with the smallest total world-space endpoint distance. For each path pair it
@@ -297,9 +332,11 @@ compares the two possible directions and uses the direction with the smaller
 endpoint-distance sum. A tied or otherwise ambiguous result is an error and the
 user must move the intended seams closer together.
 
-Vertices are matched monotonically by normalized distance along each ordered
-path. This preserves ordering even when the two paths contain different vertex
-counts. The resulting connectivity record uses edges that belong to no face.
+Vertices are matched monotonically by normalized authored edge distance along
+each ordered path. This preserves ordering and deliberate excess length even
+when paths have different lengths or vertex counts. A longer sleeve therefore
+retains the fabric needed for gathers. The resulting connectivity record uses
+edges that belong to no face.
 They receive Boolean edge attributes named
 `sewing_spring_<LABEL>`. The original marked boundaries retain
 `sewing_<LABEL>`.
@@ -349,13 +386,13 @@ They are solver constants rather than pattern data and do not alter the JSON
 contract.
 
 Taichi selects an available GPU architecture automatically and uses an explicit
-CPU fallback when GPU initialization fails. The 0.2.9 package supplies Windows
+CPU fallback when GPU initialization fails. The 0.3.0 package supplies Windows
 x64 CPython 3.13 wheels.
 
 ## 13. Update
 
 Update rereads the same absolute PDF path that created the selected Clothes
-collection. The number and normalized set of `#`-labeled panel objects must be
+collection. The normalized `#` labels and expanded mirror-instance set must be
 unchanged. The operation generates entirely new panel meshes; vertex and face
 counts may differ.
 
@@ -366,6 +403,10 @@ interpolates its current world-space deformation onto each new vertex. This is
 an initial-placement convenience, not a claim that the old and new cloth are
 physically identical.
 
+RING panels additionally store `yohsai_construction_position`. Their Update
+transfer uses the welded cylinder surface as the correspondence domain because
+a welded seam vertex cannot carry both sides of an unwrapped 2D coordinate.
+
 Existing objects, transforms, materials, collection membership, names, and
 panel indices remain. Revised flat coordinates define new stretch and bend rest
 lengths. Runtime velocity and the previous Kitsuke session are discarded.
@@ -375,10 +416,11 @@ unexpected, or ambiguous label, panel-count change, parse error, triangulation
 error, or transfer failure cancels the whole operation without modifying the
 existing garment.
 
-The sewing signature contains normalized sewing labels and their panel/segment
-membership, but not geometry coordinates. An unchanged signature preserves the
-verified Sewing state and permits direct Kitsuke. A changed signature clears
-verification; Kitsuke refuses with `Sewing required` until Sewing succeeds.
+The sewing signature contains normalized sewing labels, panel/segment
+membership, mirror flags, TOP coordinates, and RING segment indices, but not
+ordinary geometry coordinates. An unchanged signature preserves the verified
+Sewing state and permits direct Kitsuke. A changed signature clears verification;
+Kitsuke refuses with `Sewing required` until Sewing succeeds.
 
 ## 14. Future compatibility
 

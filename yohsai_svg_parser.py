@@ -75,6 +75,7 @@ class Segment:
     control2: Point | None = None
     sewing_group: str | None = None
     fold: bool = False
+    ring: bool = False
 
     def transformed(self, matrix: Matrix) -> "Segment":
         return Segment(
@@ -127,6 +128,8 @@ class Panel:
     source_path_id: str | None
     segments: list[Segment]
     update_label: str | None = None
+    mirror: bool = False
+    top: Point | None = None
 
 
 _NUMBER = r"[-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?"
@@ -136,6 +139,7 @@ _TRANSFORM_RE = re.compile(r"([A-Za-z]+)\s*\(([^)]*)\)")
 _SCALE_RE = re.compile(r"^@s\s*(" + _NUMBER + r")\s*cm$", re.IGNORECASE)
 _SEW_RE = re.compile(r"^[A-Z]$", re.IGNORECASE)
 _PANEL_LABEL_RE = re.compile(r"^[A-Z0-9_-]+$", re.IGNORECASE)
+_RING_MARKER = "RING"
 
 
 def _clean_float(value: float) -> float:
@@ -510,6 +514,7 @@ def _serialize_segment(segment: Segment, index: int, scale: float) -> dict[str, 
         "end": segment.end.as_json(scale),
         "sewing_group": segment.sewing_group,
         "fold": segment.fold,
+        "ring": segment.ring,
     }
     if segment.kind == "cubic":
         assert segment.control1 is not None and segment.control2 is not None
@@ -525,8 +530,92 @@ def _serialize_segment(segment: Segment, index: int, scale: float) -> dict[str, 
             "end": result["end"],
             "sewing_group": result["sewing_group"],
             "fold": result["fold"],
+            "ring": result["ring"],
         }
     return result
+
+
+def _panel_for_internal_command(annotation: Annotation, panels: list[Panel]) -> Panel:
+    containing = [panel for panel in panels if _point_in_polygon(annotation.position, _panel_polygon(panel))]
+    if len(containing) != 1:
+        raise ParseError(
+            f"Command {annotation.text!r} must be inside exactly one labeled panel; found {len(containing)}."
+        )
+    return containing[0]
+
+
+def _expand_ring_bounded_sewing(panel: Panel) -> None:
+    """Extend a seam marker across its whole boundary arc between two RING edges."""
+    ring_indices = [index for index, segment in enumerate(panel.segments) if segment.ring]
+    if not ring_indices:
+        return
+    if len(ring_indices) != 2:
+        raise ParseError(f"Panel {panel.panel_id!r} must contain exactly two RING edges.")
+    if panel.top is None:
+        raise ParseError(f"Panel {panel.panel_id!r} with RING edges requires one @TOP command.")
+
+    first, second = sorted(ring_indices)
+    arcs = [
+        list(range(first + 1, second)),
+        list(range(second + 1, len(panel.segments))) + list(range(0, first)),
+    ]
+    for arc in arcs:
+        labels = {panel.segments[index].sewing_group for index in arc if panel.segments[index].sewing_group}
+        if len(labels) > 1:
+            raise ParseError(f"Panel {panel.panel_id!r} has conflicting sewing markers between its RING edges.")
+        if labels:
+            label = next(iter(labels))
+            for index in arc:
+                panel.segments[index].sewing_group = label
+
+
+def _collect_pdf_annotations(
+    annotations: list[Annotation], panels: list[Panel], panel_label_annotations: set[Annotation]
+) -> dict[str, list[dict[str, object]]]:
+    sewing_groups: dict[str, list[dict[str, object]]] = {}
+    for annotation in annotations:
+        if annotation in panel_label_annotations:
+            continue
+        normalized = "".join(annotation.text.split()).upper()
+        if normalized == "@M":
+            panel = _panel_for_internal_command(annotation, panels)
+            if panel.mirror:
+                raise ParseError(f"Panel {panel.panel_id!r} contains more than one @M command.")
+            panel.mirror = True
+        elif normalized == "@TOP":
+            panel = _panel_for_internal_command(annotation, panels)
+            if panel.top is not None:
+                raise ParseError(f"Panel {panel.panel_id!r} contains more than one @TOP command.")
+            panel.top = annotation.position
+        else:
+            panel, segment_index, segment = _nearest_panel_segment(annotation, panels)
+            if normalized == "@W":
+                segment.fold = True
+            elif normalized == _RING_MARKER:
+                if segment.ring:
+                    raise ParseError(f"Panel {panel.panel_id!r} segment {segment_index} has duplicate RING markers.")
+                if segment.fold or segment.sewing_group:
+                    raise ParseError(f"Panel {panel.panel_id!r} segment {segment_index} has conflicting markers.")
+                segment.ring = True
+            elif _SEW_RE.fullmatch(normalized):
+                if segment.ring or (segment.sewing_group is not None and segment.sewing_group != normalized):
+                    raise ParseError(
+                        f"Panel {panel.panel_id!r} segment {segment_index} has conflicting sewing markers."
+                    )
+                segment.sewing_group = normalized
+            elif normalized.startswith("@"):
+                raise ParseError(f"Unsupported PDF annotation {annotation.text!r}.")
+
+    for panel in panels:
+        _expand_ring_bounded_sewing(panel)
+        if panel.top is not None and not any(segment.ring for segment in panel.segments):
+            raise ParseError(f"Panel {panel.panel_id!r} uses @TOP without two RING edges.")
+        for segment_index, segment in enumerate(panel.segments):
+            if segment.sewing_group:
+                sewing_groups.setdefault(segment.sewing_group, []).append(
+                    {"panel": panel.panel_id, "segment": segment_index}
+                )
+    return sewing_groups
 
 
 def parse_svg(svg_path: str | os.PathLike[str]) -> dict[str, object]:
@@ -663,15 +752,24 @@ def _pdf_point(ctm: Matrix, x: object, y: object) -> Point:
 
 def _pdf_decode_string(value: object, font: object | None) -> str:
     text = str(value)
-    if font is None or str(font.get("/Encoding", "")) != "/Identity-H" or font.get("/ToUnicode") is not None:
-        return text
     raw = getattr(value, "original_bytes", None)
+    if font is not None and (
+        str(font.get("/Encoding", "")) != "/Identity-H" or font.get("/ToUnicode") is not None
+    ):
+        return text
     if not isinstance(raw, bytes) or len(raw) % 2:
         return text
+    # Illustrator sometimes omits a nested Form's font resource even though
+    # its strings use the same ASCII CID subset as the surrounding Identity-H
+    # font. The embedded CIDs are 1..95 and map to ASCII by adding 31.
+    cids = [int.from_bytes(raw[index:index + 2], "big") for index in range(0, len(raw), 2)]
+    if font is None and not cids:
+        return text
+    if any(cid < 1 or cid > 95 for cid in cids):
+        return text
     result: list[str] = []
-    for index in range(0, len(raw), 2):
-        cid = int.from_bytes(raw[index:index + 2], "big")
-        result.append(chr(cid + 31) if 1 <= cid <= 95 else "\ufffd")
+    for cid in cids:
+        result.append(chr(cid + 31))
     return "".join(result)
 
 
@@ -857,30 +955,19 @@ def parse_pdf(path: str | os.PathLike[str]) -> dict[str, object]:
         annotation
         for annotation in annotations
         if (normalized := "".join(annotation.text.split()))
-        and (normalized.startswith("#") or normalized.startswith("@") or _SEW_RE.fullmatch(normalized))
+        and (
+            normalized.startswith("#")
+            or normalized.startswith("@")
+            or normalized.upper() == _RING_MARKER
+            or _SEW_RE.fullmatch(normalized)
+        )
     ]
     panel_label_annotations = _assign_panel_labels(command_annotations, all_panels)
     panels = [panel for panel in all_panels if panel.update_label is not None]
     if not panels:
         raise ParseError("PDF contains no closed panel with an internal # label.")
 
-    sewing_groups: dict[str, list[dict[str, object]]] = {}
-    for annotation in command_annotations:
-        if annotation in panel_label_annotations:
-            continue
-        normalized = annotation.text.strip().upper()
-        panel, segment_index, segment = _nearest_panel_segment(annotation, panels)
-        if normalized == "@W":
-            segment.fold = True
-        elif _SEW_RE.fullmatch(normalized):
-            if segment.sewing_group is not None and segment.sewing_group != normalized:
-                raise ParseError(
-                    f"Panel {panel.panel_id!r} segment {segment_index} has conflicting sewing markers."
-                )
-            segment.sewing_group = normalized
-            sewing_groups.setdefault(normalized, []).append({"panel": panel.panel_id, "segment": segment_index})
-        elif normalized.startswith("@"):
-            raise ParseError(f"Unsupported PDF annotation {annotation.text!r}.")
+    sewing_groups = _collect_pdf_annotations(command_annotations, panels, panel_label_annotations)
 
     document: dict[str, object] = {
         "schema": SCHEMA_NAME,
@@ -900,6 +987,8 @@ def parse_pdf(path: str | os.PathLike[str]) -> dict[str, object]:
                 "label": panel.update_label,
                 "source_path_id": None,
                 "closed": True,
+                "mirror": panel.mirror,
+                "top": panel.top.as_json(_PDF_METERS_PER_POINT) if panel.top else None,
                 "segments": [
                     _serialize_segment(segment, index, _PDF_METERS_PER_POINT)
                     for index, segment in enumerate(panel.segments)

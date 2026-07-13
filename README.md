@@ -1,4 +1,4 @@
-# Yohsai 0.2.9
+# Yohsai 0.3.0
 
 Yohsai is a public, in-development Blender extension for clothing construction.
 The API, data shape, and generated output are still experimental.
@@ -44,11 +44,20 @@ artwork is not emitted, subject to the containment limitation recorded in
 The standalone parser runs asynchronously with Blender's bundled Python and
 writes a fixed, atomically replaced JSON document in Blender's private Yohsai
 data directory. PDF parsing uses the bundled `pypdf` and `typing_extensions`
-wheels. Blender then expands `@W`
-fold panels, creates an approximately 1 cm constrained triangular mesh for each
-closed pattern panel, and packs the separate objects into one numbered
-`CLOTHES_###` collection at Y = -1 m. Sewing labels and fold edges are retained
-as mesh attributes.
+wheels. Blender expands `@W` fold panels and duplicates a panel containing
+`@M` as authored-left and mirrored-right parts. Two boundary edges marked
+`RING` are reserved construction edges: Load wraps the panel into a tube,
+welds those boundaries, and uses the internal `@TOP` position as the
+maximum-Z circumferential direction. It then creates an approximately 1 cm
+constrained triangular mesh and packs the separate objects into one numbered
+`CLOTHES_###` collection. Sewing labels and fold edges remain mesh attributes;
+`RING` does not become a sewing variable.
+
+On a RING panel, a single-letter sewing marker extends over its complete
+boundary arc between the two RING edges. A closed sleeve `C` can therefore sew
+to the composite path formed by the front `C` followed by the back `C`.
+Normalized pattern distance preserves ordering even when the sleeve path is
+longer, leaving the authored excess length to form gathers.
 
 After positioning the separate parts, `Sewing` infers each seam's direction from
 its endpoints. It preserves the original parts as hidden source objects and
@@ -112,7 +121,7 @@ recovery state. Continuing an abandoned, partially dressed session across a
 restart is not supported; begin again from Load/Sewing when required.
 
 Taichi chooses an available GPU backend automatically and falls back to the CPU
-only when no GPU backend initializes. Version 0.2.9 bundles the CPython 3.13
+only when no GPU backend initializes. Version 0.3.0 bundles the CPython 3.13
 Windows x64 wheels and is packaged for Windows x64.
 
 The input and JSON contracts are documented in `SVG_TO_JSON_SPEC.md`.

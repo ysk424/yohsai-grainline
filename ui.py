@@ -232,8 +232,8 @@ def _poll_svg_parser() -> float | None:
             clothes_collection = create_clothes_mesh(bpy.context, validated_document)
             if scene is not None and hasattr(scene, "yohsai"):
                 scene.yohsai.clothes_collection = clothes_collection
-            panel_count = len(validated_document["panels"])
-            _set_parse_status(f"Loaded {clothes_collection.name}: {panel_count} part(s)")
+            part_count = sum(obj.get("yohsai_role") == "part" for obj in clothes_collection.objects)
+            _set_parse_status(f"Loaded {clothes_collection.name}: {part_count} part(s)")
         _loaded_pattern_json = validated_document
     except Exception as exc:
         operation = "Update" if _parse_action == "UPDATE" else "Load"

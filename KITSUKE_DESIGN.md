@@ -2,7 +2,7 @@
 
 Status: active implementation and empirical tuning  
 Recorded: 2026-07-11 (Asia/Tokyo)  
-Current tested package: Yohsai 0.2.9, Windows x64, Blender 5.2 / Python 3.13,
+Current tested package: Yohsai 0.3.0, Windows x64, Blender 5.2 / Python 3.13,
 Taichi 1.7.4
 
 ## 1. Product idea
@@ -24,7 +24,8 @@ topology change returns to the pattern and starts a new Load.
 
 ## 2. Confirmed user workflow
 
-1. `Load` creates one Mesh object for every pattern panel.
+1. `Load` creates one Mesh object for every pattern panel instance; `@M`
+   expands one authored panel into LEFT and RIGHT instances.
 2. The user translates and rotates the separate panels around the character.
 3. `Sewing` constructs a combined preview with loose sewing edges.
 4. The user visually checks sewing correspondence and agreement with the
@@ -320,7 +321,7 @@ Manual testing confirmed this sequence works in 0.2.6.
   detected even though they are unsupported.
 - Live Taichi objects are not serialized. Blender stores only same-runtime
   Undo/Redo recovery data; cross-restart continuation is unsupported.
-- The bundled 0.2.9 distribution is Windows x64 / CPython 3.13.
+- The bundled 0.3.0 distribution is Windows x64 / CPython 3.13.
 - Taichi wheels make the extension archive approximately 85 MB.
 
 XPBD is a likely later improvement because compliance reduces dependence on
@@ -331,7 +332,7 @@ current interaction model rather than block tuning of the central workflow.
 
 When work resumes:
 
-1. Use `dist/yohsai-0.2.9.zip` unless a newer build exists.
+1. Use `dist/yohsai-0.3.0.zip` unless a newer build exists.
 2. Fully close Blender and Blender MCP before replacing the extension, because
    the loaded Taichi native library may lock its wheel files on Windows.
 3. Start from Load/Sewing after an extension or Blender restart; abandoned

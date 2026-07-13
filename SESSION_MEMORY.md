@@ -2,7 +2,7 @@
 
 Status: authoritative handoff for the next Codex session  
 Recorded: 2026-07-11 (Asia/Tokyo)  
-Release prepared today: Yohsai 0.2.9
+Release prepared today: Yohsai 0.3.0
 
 ## Product viewpoint that must not drift
 
@@ -107,7 +107,7 @@ Tests:
 
 ## Current supported input
 
-The real integration input is `C:\Users\azoo\Desktop\test2.pdf`. It currently
+The original integration input is `C:\Users\azoo\Desktop\test2.pdf`. It currently
 produces two labeled panels (`OMOTE`, `URA`) and sewing groups A/B. Bundled dependencies are
 Taichi 1.7.4, pypdf 6.14.2, and their listed wheels for Blender 5.2 / CPython
 3.13 on Windows x64.
@@ -145,4 +145,10 @@ continuous-collision strategy is the next substantial solver task.
 5. Run both Blender integration scripts against the installed extension.
 6. Confirm `git status --short` is empty, then commit and push `main`.
 
-The expected archive for this handoff is `dist/yohsai-0.2.9.zip`.
+The sleeve integration input is `C:\Users\azoo\Desktop\test3.pdf`. It adds
+`#SODE`, `@M`, `@TOP`, two `RING` edges, and a C seam whose sleeve path is
+longer than the combined front/back C path. Load creates left/right sleeve
+instances, wraps each into a welded cylinder, and Sewing pairs each closed C
+loop with one composite body C loop.
+
+The expected archive for this handoff is `dist/yohsai-0.3.0.zip`.

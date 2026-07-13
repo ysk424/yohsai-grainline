@@ -174,10 +174,21 @@ shortcut.
 `@` is reserved for commands and construction metadata. Plain sewing markers
 continue to represent sewing groups. `#` identifies panels.
 
+Implemented construction commands include:
+
+- `@M`: create one authored-left and one mirrored-right instance of a panel;
+- `RING`: reserve two boundary edges for topological welding into a tube;
+- `@TOP`: select the circumferential position that faces maximum world Z on a
+  RING tube.
+
+On a RING panel, a sewing letter marks the complete boundary arc bounded by the
+two RING edges. This lets a sleeve armhole become one closed sewing path. The
+matching body armhole may remain split across front and back panels; Sewing
+combines those two open paths virtually and matches them by normalized authored
+length. Unequal lengths are intentional construction data and create gathers.
+
 Deferred commands include:
 
-- `@M`: create one left/right mirrored set; this is common for sleeves and
-  symmetric garment pieces;
 - `@N<number>`: create repeated identical pieces, such as five or ten frill
   panels; this is deferred because replicated sewing labels and partner
   selection require a complete rule;

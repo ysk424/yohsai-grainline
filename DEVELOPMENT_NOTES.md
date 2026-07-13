@@ -2,7 +2,7 @@
 
 Status: public development preview.
 
-Current version: 0.2.9.
+Current version: 0.3.0.
 
 The authoritative Kitsuke design, tuning log, known limitations, and resume
 checklist are maintained in `KITSUKE_DESIGN.md`.
@@ -53,9 +53,11 @@ treating Blender mesh identity as authoritative.
   and asynchronously load its fixed, atomically written JSON result. PDF uses
   bundled `pypdf` and `typing_extensions` wheels. SVG input is no longer
   supported.
-- Load expands fold-cut panels and creates one packed, cloth-ready triangular
-  Mesh object per closed panel in a new numbered `CLOTHES_###` collection.
-  Sewing and fold membership are preserved as mesh attributes.
+- Load expands fold-cut panels and `@M` mirror instances. Two `RING` boundaries
+  are sampled equally and welded after `@TOP`-oriented tube construction. Load
+  creates one packed, cloth-ready triangular Mesh object per resulting instance
+  in a new numbered `CLOTHES_###` collection. Sewing and fold membership are
+  preserved as mesh attributes; RING is a reserved construction word.
 - `#` text inside a panel provides a normalized, human-authored identity for
   Update. Whitespace is removed; ASCII letters compare case-insensitively; and
   digits, underscore, and hyphen are accepted.
@@ -68,8 +70,9 @@ treating Blender mesh identity as authoritative.
   until the independent Sewing operation succeeds again.
 - `Sewing` orders each marked boundary path, infers its direction from the
   positioned world-space endpoints, and creates a combined mesh with loose
-  sewing-spring edges. The separate source parts remain hidden in the same
-  collection for future update work.
+  sewing-spring edges. A closed RING sleeve path pairs with the virtual loop
+  formed by its front and back body paths. The separate source parts remain
+  hidden in the same collection for future update work.
 - `Kitsuke` treats the separate panel objects as the editable 3D realization.
   The first click constructs transient Taichi stretch, bend, sewing,
   body-contact, and self-contact state; later clicks reuse it while synchronizing

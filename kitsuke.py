@@ -189,20 +189,38 @@ def _pattern_rest_vertices(obj: bpy.types.Object) -> np.ndarray:
 
 def _edge_constraints(parts: list[_PartRange], rest_positions: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     edges: list[tuple[int, int]] = []
+    rest_values: list[float] = []
     for part in parts:
-        edges.extend(
-            (part.start + edge.vertices[0], part.start + edge.vertices[1])
-            for edge in part.obj.data.edges
+        attribute = part.obj.data.attributes.get("yohsai_pattern_edge_rest")
+        valid_attribute = (
+            attribute is not None
+            and attribute.domain == "EDGE"
+            and len(attribute.data) == len(part.obj.data.edges)
         )
+        for edge in part.obj.data.edges:
+            a = part.start + edge.vertices[0]
+            b = part.start + edge.vertices[1]
+            edges.append((a, b))
+            if valid_attribute:
+                rest_values.append(float(attribute.data[edge.index].value))
+            else:
+                rest_values.append(float(np.linalg.norm(rest_positions[a] - rest_positions[b])))
     indices = np.asarray(edges, dtype=np.int32).reshape((-1, 2))
-    rest = np.linalg.norm(rest_positions[indices[:, 0]] - rest_positions[indices[:, 1]], axis=1).astype(np.float32)
+    rest = np.asarray(rest_values, dtype=np.float32)
     return indices, rest
 
 
 def _bending_constraints(parts: list[_PartRange], rest_positions: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     pairs: list[tuple[int, int]] = []
+    rest_values: list[float] = []
     for part in parts:
         mesh = part.obj.data
+        local_rest = rest_positions[part.start:part.start + part.count]
+        if bool(part.obj.get("yohsai_ring_closed", False)):
+            attribute = mesh.attributes.get("yohsai_construction_position")
+            if attribute is None or attribute.domain != "POINT" or len(attribute.data) != len(mesh.vertices):
+                raise KitsukeError(f"{part.obj.name} has no RING construction coordinates.")
+            local_rest = np.asarray([tuple(item.vector) for item in attribute.data], dtype=np.float32)
         mesh.calc_loop_triangles()
         edge_opposites: dict[tuple[int, int], list[int]] = {}
         for triangle in mesh.loop_triangles:
@@ -212,10 +230,11 @@ def _bending_constraints(parts: list[_PartRange], rest_positions: np.ndarray) ->
         for opposites in edge_opposites.values():
             if len(opposites) == 2 and opposites[0] != opposites[1]:
                 pairs.append((part.start + opposites[0], part.start + opposites[1]))
+                rest_values.append(float(np.linalg.norm(local_rest[opposites[0]] - local_rest[opposites[1]])))
     indices = np.asarray(pairs, dtype=np.int32).reshape((-1, 2))
     if not len(indices):
         return indices, np.empty(0, dtype=np.float32)
-    rest = np.linalg.norm(rest_positions[indices[:, 0]] - rest_positions[indices[:, 1]], axis=1).astype(np.float32)
+    rest = np.asarray(rest_values, dtype=np.float32)
     return indices, rest
 
 

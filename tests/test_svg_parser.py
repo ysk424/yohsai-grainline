@@ -35,6 +35,23 @@ class SvgParserTests(unittest.TestCase):
             2,
         )
 
+    @unittest.skipUnless(importlib.util.find_spec("pypdf"), "pypdf is not installed in this test interpreter")
+    def test_supplied_ring_sleeve_pdf(self) -> None:
+        source = Path.home() / "Desktop" / "test3.pdf"
+        if not source.is_file():
+            self.skipTest("The user-supplied Desktop/test3.pdf is not available.")
+        document = parser.parse_pdf(source)
+        self.assertEqual([panel["label"] for panel in document["panels"]], ["OMOTE", "URA", "SODE"])
+        sleeve = document["panels"][2]
+        self.assertTrue(sleeve["mirror"])
+        self.assertIsNotNone(sleeve["top"])
+        self.assertEqual(sum(segment["ring"] for segment in sleeve["segments"]), 2)
+        self.assertEqual(
+            [segment["index"] for segment in sleeve["segments"] if segment["sewing_group"] == "C"],
+            [3, 4],
+        )
+        self.assertEqual(len(document["sewing_groups"]["C"]), 4)
+
 
 if __name__ == "__main__":
     unittest.main()

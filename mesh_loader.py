@@ -38,17 +38,23 @@ class UpdateError(ValueError):
 class EdgeMeta:
     sewing_group: str | None = None
     fold: bool = False
+    ring: bool = False
 
 
 @dataclass
 class PanelGeometry:
     panel_id: str
     update_label: str | None
+    instance_id: str
+    mirror_side: str
     vertices: list[Vector]
+    construction_vertices: list[Vector]
     pattern_vertices: list[Vector]
     edges: list[tuple[int, int]]
     faces: list[tuple[int, ...]]
     edge_meta: dict[tuple[int, int], EdgeMeta]
+    edge_rest: dict[tuple[int, int], float]
+    ring_closed: bool
 
 
 def _point(value: object, field: str) -> Vector:
@@ -77,22 +83,22 @@ def _cubic(start: Vector, control1: Vector, control2: Vector, end: Vector, t: fl
     )
 
 
-def _segment_points(segment: dict[str, Any], spacing: float) -> list[Vector]:
+def _segment_points(segment: dict[str, Any], spacing: float, count: int | None = None) -> list[Vector]:
     start = _point(segment.get("start"), "segment.start")
     end = _point(segment.get("end"), "segment.end")
     kind = segment.get("type")
     if kind == "line":
         length = _distance(start, end)
-        count = max(1, math.ceil(length / spacing))
-        return [start.lerp(end, index / count) for index in range(count + 1)]
+        sample_count = count if count is not None else max(1, math.ceil(length / spacing))
+        return [start.lerp(end, index / sample_count) for index in range(sample_count + 1)]
     if kind != "cubic":
         raise MeshLoadError(f"Unsupported JSON segment type: {kind!r}")
     control1 = _point(segment.get("control1"), "segment.control1")
     control2 = _point(segment.get("control2"), "segment.control2")
     estimates = [_cubic(start, control1, control2, end, index / 128.0) for index in range(129)]
     length = sum(_distance(a, b) for a, b in zip(estimates, estimates[1:]))
-    count = max(1, math.ceil(length / spacing))
-    return [_cubic(start, control1, control2, end, index / count) for index in range(count + 1)]
+    sample_count = count if count is not None else max(1, math.ceil(length / spacing))
+    return [_cubic(start, control1, control2, end, index / sample_count) for index in range(sample_count + 1)]
 
 
 def _segment_meta(segment: dict[str, Any]) -> EdgeMeta:
@@ -101,11 +107,17 @@ def _segment_meta(segment: dict[str, Any]) -> EdgeMeta:
         if not isinstance(label, str) or len(label) != 1 or not label.isascii() or not label.isalpha():
             raise MeshLoadError(f"Invalid sewing group: {label!r}")
         label = label.upper()
-    return EdgeMeta(label, bool(segment.get("fold", False)))
+    fold = bool(segment.get("fold", False))
+    ring = bool(segment.get("ring", False))
+    if ring and (label is not None or fold):
+        raise MeshLoadError("A RING edge cannot also be a sewing or fold edge.")
+    return EdgeMeta(label, fold, ring)
 
 
-def _sample_segment(segment: dict[str, Any], spacing: float) -> tuple[list[Vector], list[EdgeMeta]]:
-    points = _segment_points(segment, spacing)
+def _sample_segment(
+    segment: dict[str, Any], spacing: float, count: int | None = None
+) -> tuple[list[Vector], list[EdgeMeta]]:
+    points = _segment_points(segment, spacing, count)
     if len(points) < 2 or any(_distance(a, b) <= 1.0e-10 for a, b in zip(points, points[1:])):
         raise MeshLoadError("A panel contains a zero-length sampled edge.")
     return points, [_segment_meta(segment)] * (len(points) - 1)
@@ -141,14 +153,27 @@ def _panel_outline(
     if not isinstance(segments, list) or len(segments) < 3:
         raise MeshLoadError(f"Panel {panel.get('id')!r} needs at least three segments.")
     fold_indices = [index for index, segment in enumerate(segments) if bool(segment.get("fold", False))]
+    ring_indices = [index for index, segment in enumerate(segments) if bool(segment.get("ring", False))]
     if len(fold_indices) > 1:
         raise MeshLoadError(f"Panel {panel.get('id')!r} has more than one fold segment.")
+    if ring_indices and len(ring_indices) != 2:
+        raise MeshLoadError(f"Panel {panel.get('id')!r} must have exactly two RING segments.")
+    if ring_indices and fold_indices:
+        raise MeshLoadError(f"Panel {panel.get('id')!r} cannot combine RING and @W in one panel.")
 
     if not fold_indices:
+        ring_count = None
+        if ring_indices:
+            ring_count = max(
+                len(_segment_points(segments[index], spacing)) - 1
+                for index in ring_indices
+            )
         points: list[Vector] = []
         metadata: list[EdgeMeta] = []
-        for segment in segments:
-            sampled, sampled_meta = _sample_segment(segment, spacing)
+        for segment_index, segment in enumerate(segments):
+            sampled, sampled_meta = _sample_segment(
+                segment, spacing, ring_count if segment_index in ring_indices else None
+            )
             if not points:
                 points.extend(sampled)
             else:
@@ -187,7 +212,7 @@ def _panel_outline(
 
     reflected = [_reflect(point, fold_start, fold_end) for point in nonfold_points]
     mirrored_points = list(reversed(reflected))  # fold start -> fold end
-    mirrored_metadata = [EdgeMeta(meta.sewing_group, False) for meta in reversed(nonfold_metadata)]
+    mirrored_metadata = [EdgeMeta(meta.sewing_group, False, False) for meta in reversed(nonfold_metadata)]
 
     # Close the original non-fold path with its mirrored counterpart. Endpoints
     # lie on the fold and are welded by using only one copy of each.
@@ -256,7 +281,170 @@ def _find_vertex(points: list[Vector], target: Vector, tolerance: float = 1.0e-8
     raise MeshLoadError("A fold endpoint was not found on the expanded boundary.")
 
 
-def _triangulate_panel(panel: dict[str, Any], spacing: float) -> PanelGeometry:
+def _marked_edge_chains(
+    edges: list[tuple[int, int]], edge_meta: dict[tuple[int, int], EdgeMeta], marker: str
+) -> list[list[int]]:
+    marked = [edge for edge in edges if bool(getattr(edge_meta.get(_edge_key(*edge)), marker, False))]
+    adjacency: dict[int, set[int]] = {}
+    for a, b in marked:
+        adjacency.setdefault(a, set()).add(b)
+        adjacency.setdefault(b, set()).add(a)
+    if any(len(neighbors) > 2 for neighbors in adjacency.values()):
+        raise MeshLoadError(f"{marker.upper()} edges form a branching path.")
+    chains: list[list[int]] = []
+    remaining = set(adjacency)
+    while remaining:
+        component: set[int] = set()
+        pending = [next(iter(remaining))]
+        while pending:
+            vertex = pending.pop()
+            if vertex in component:
+                continue
+            component.add(vertex)
+            remaining.discard(vertex)
+            pending.extend(adjacency[vertex] - component)
+        endpoints = [vertex for vertex in component if len(adjacency[vertex]) == 1]
+        if len(endpoints) != 2:
+            raise MeshLoadError(f"{marker.upper()} edges must form open paths before welding.")
+        ordered = [min(endpoints)]
+        previous = None
+        current = ordered[0]
+        while current not in endpoints or len(ordered) == 1:
+            following = adjacency[current] - ({previous} if previous is not None else set())
+            if not following:
+                break
+            vertex = next(iter(following))
+            ordered.append(vertex)
+            previous, current = current, vertex
+        chains.append(ordered)
+    return chains
+
+
+def _boundary_x_at_y(points: list[Vector], y: float) -> float:
+    candidates: list[tuple[float, float]] = []
+    for start, end in zip(points, points[1:]):
+        delta = end.y - start.y
+        if abs(delta) <= 1.0e-12:
+            candidates.append((abs(y - start.y), (start.x + end.x) * 0.5))
+            continue
+        factor = (y - start.y) / delta
+        clamped = max(0.0, min(1.0, factor))
+        projected_y = start.y + delta * clamped
+        candidates.append((abs(y - projected_y), start.x + (end.x - start.x) * clamped))
+    if not candidates:
+        raise MeshLoadError("A RING boundary has no usable edges.")
+    return min(candidates, key=lambda item: item[0])[1]
+
+
+def _ring_construction_vertices(
+    pattern_vertices: list[Vector], ring_chains: list[list[int]], top: Vector
+) -> list[Vector]:
+    left_indices, right_indices = sorted(
+        ring_chains, key=lambda chain: sum(pattern_vertices[index].x for index in chain) / len(chain)
+    )
+    direct = sum(abs(pattern_vertices[a].y - pattern_vertices[b].y) for a, b in zip(left_indices, right_indices))
+    reverse = sum(
+        abs(pattern_vertices[a].y - pattern_vertices[b].y)
+        for a, b in zip(left_indices, reversed(right_indices))
+    )
+    if reverse < direct:
+        right_indices = list(reversed(right_indices))
+    left = [pattern_vertices[index] for index in left_indices]
+    right = [pattern_vertices[index] for index in right_indices]
+    widths = [(right_point - left_point).length for left_point, right_point in zip(left, right)]
+    circumference = sum(widths) / len(widths)
+    if circumference <= 1.0e-10:
+        raise MeshLoadError("RING edges do not enclose a usable sleeve width.")
+    radius = circumference / (2.0 * math.pi)
+    axis_center = sum(point.y for point in pattern_vertices) / len(pattern_vertices)
+
+    top_left = _boundary_x_at_y(left, top.y)
+    top_right = _boundary_x_at_y(right, top.y)
+    if top_right - top_left <= 1.0e-10:
+        raise MeshLoadError("@TOP cannot define the sleeve's upward direction.")
+    top_u = (top.x - top_left) / (top_right - top_left)
+
+    result: list[Vector] = []
+    for point in pattern_vertices:
+        left_x = _boundary_x_at_y(left, point.y)
+        right_x = _boundary_x_at_y(right, point.y)
+        if right_x - left_x <= 1.0e-10:
+            raise MeshLoadError("RING boundaries cross while constructing the sleeve tube.")
+        u = (point.x - left_x) / (right_x - left_x)
+        angle = 2.0 * math.pi * (u - top_u)
+        result.append(Vector((point.y - axis_center, radius * math.sin(angle), radius * math.cos(angle))))
+    return result
+
+
+def _weld_ring(
+    pattern_vertices: list[Vector],
+    construction_vertices: list[Vector],
+    edges: list[tuple[int, int]],
+    faces: list[tuple[int, ...]],
+    edge_meta: dict[tuple[int, int], EdgeMeta],
+) -> tuple[
+    list[Vector], list[Vector], list[tuple[int, int]], list[tuple[int, ...]],
+    dict[tuple[int, int], EdgeMeta], dict[tuple[int, int], float]
+]:
+    chains = _marked_edge_chains(edges, edge_meta, "ring")
+    if len(chains) != 2 or len(chains[0]) != len(chains[1]):
+        raise MeshLoadError("The two RING boundaries must produce matching vertex counts.")
+    first, second = chains
+    direct = sum(abs(pattern_vertices[a].y - pattern_vertices[b].y) for a, b in zip(first, second))
+    reverse = sum(abs(pattern_vertices[a].y - pattern_vertices[b].y) for a, b in zip(first, reversed(second)))
+    if reverse < direct:
+        second = list(reversed(second))
+
+    representative = {right: left for left, right in zip(first, second)}
+    groups: dict[int, list[int]] = {}
+    for index in range(len(pattern_vertices)):
+        groups.setdefault(representative.get(index, index), []).append(index)
+    kept = sorted(groups)
+    new_index = {old: index for index, old in enumerate(kept)}
+
+    new_pattern = [
+        sum((pattern_vertices[index] for index in groups[old]), Vector((0.0, 0.0))) / len(groups[old])
+        for old in kept
+    ]
+    new_construction = [
+        sum((construction_vertices[index] for index in groups[old]), Vector((0.0, 0.0, 0.0))) / len(groups[old])
+        for old in kept
+    ]
+
+    def remap_vertex(index: int) -> int:
+        return new_index[representative.get(index, index)]
+
+    new_faces: list[tuple[int, ...]] = []
+    for face in faces:
+        remapped = tuple(remap_vertex(index) for index in face)
+        if len(set(remapped)) < 3:
+            continue
+        new_faces.append(remapped)
+
+    meta_values: dict[tuple[int, int], list[EdgeMeta]] = {}
+    rest_values: dict[tuple[int, int], list[float]] = {}
+    for a, b in edges:
+        key = _edge_key(remap_vertex(a), remap_vertex(b))
+        if key[0] == key[1]:
+            continue
+        meta_values.setdefault(key, []).append(edge_meta.get(_edge_key(a, b), EdgeMeta()))
+        rest_values.setdefault(key, []).append((pattern_vertices[a] - pattern_vertices[b]).length)
+
+    new_meta: dict[tuple[int, int], EdgeMeta] = {}
+    for key, values in meta_values.items():
+        labels = {value.sewing_group for value in values if value.sewing_group}
+        if len(labels) > 1:
+            raise MeshLoadError("RING welding merged conflicting sewing edges.")
+        meta = EdgeMeta(next(iter(labels), None), any(value.fold for value in values), False)
+        if meta.sewing_group or meta.fold:
+            new_meta[key] = meta
+    new_rest = {key: sum(values) / len(values) for key, values in rest_values.items()}
+    return new_pattern, new_construction, sorted(rest_values), new_faces, new_meta, new_rest
+
+
+def _triangulate_panel(
+    panel: dict[str, Any], spacing: float, mirror_side: str = ""
+) -> PanelGeometry:
     panel_id = str(panel.get("id", "panel"))
     outline, outline_meta, fold_points = _panel_outline(panel, spacing)
     if len(outline) < 3 or abs(_signed_area(outline)) <= 1.0e-12:
@@ -273,7 +461,7 @@ def _triangulate_panel(panel: dict[str, Any], spacing: float) -> PanelGeometry:
         fold_indices.append(_find_vertex(input_vertices, fold_points[-1]))
         for start, end in zip(fold_indices, fold_indices[1:]):
             input_edges.append((start, end))
-            input_meta.append(EdgeMeta(None, True))
+            input_meta.append(EdgeMeta(None, True, False))
 
     input_vertices.extend(_interior_grid(outline, spacing))
     try:
@@ -296,30 +484,90 @@ def _triangulate_panel(panel: dict[str, Any], spacing: float) -> PanelGeometry:
     for edge, origins in zip(edges, original_edges):
         labels: set[str] = set()
         fold = False
+        ring = False
         for origin in origins:
             if 0 <= origin < len(input_meta):
                 meta = input_meta[origin]
                 if meta.sewing_group:
                     labels.add(meta.sewing_group)
                 fold = fold or meta.fold
+                ring = ring or meta.ring
         if len(labels) > 1:
             raise MeshLoadError(f"Panel {panel_id!r} triangulation merged conflicting sewing edges.")
-        if labels or fold:
-            edge_meta[_edge_key(*edge)] = EdgeMeta(next(iter(labels), None), fold)
+        if labels or fold or ring:
+            edge_meta[_edge_key(*edge)] = EdgeMeta(next(iter(labels), None), fold, ring)
 
     update_label = panel.get("label")
     if update_label is not None and (not isinstance(update_label, str) or not update_label):
         raise MeshLoadError(f"Panel {panel_id!r} has an invalid update label.")
-    result_vertices = list(vertices)
+    pattern_vertices = list(vertices)
+    result_edges = list(edges)
+    result_faces = triangles
+    ring_closed = any(meta.ring for meta in edge_meta.values())
+    if ring_closed:
+        top = _point(panel.get("top"), "panel.top")
+        ring_chains = _marked_edge_chains(result_edges, edge_meta, "ring")
+        if len(ring_chains) != 2:
+            raise MeshLoadError(f"Panel {panel_id!r} must triangulate to two RING boundary paths.")
+        construction_vertices = _ring_construction_vertices(pattern_vertices, ring_chains, top)
+        (
+            pattern_vertices,
+            construction_vertices,
+            result_edges,
+            result_faces,
+            edge_meta,
+            edge_rest,
+        ) = _weld_ring(pattern_vertices, construction_vertices, result_edges, result_faces, edge_meta)
+        for face in result_faces:
+            a, b, c = (construction_vertices[index] for index in face[:3])
+            normal = (b - a).cross(c - a)
+            center = (a + b + c) / 3.0
+            radial = Vector((0.0, center.y, center.z))
+            if normal.length_squared > 1.0e-16 and radial.length_squared > 1.0e-16:
+                if normal.dot(radial) < 0.0:
+                    result_faces = [tuple(reversed(item)) for item in result_faces]
+                break
+    else:
+        construction_vertices = [Vector((point.x, 0.0, point.y)) for point in pattern_vertices]
+        edge_rest = {
+            _edge_key(a, b): (pattern_vertices[a] - pattern_vertices[b]).length
+            for a, b in result_edges
+        }
+
+    mirrored = mirror_side == "RIGHT"
+    if mirrored:
+        center_x = (min(point.x for point in pattern_vertices) + max(point.x for point in pattern_vertices)) * 0.5
+        pattern_vertices = [Vector((2.0 * center_x - point.x, point.y)) for point in pattern_vertices]
+        construction_vertices = [Vector((-point.x, point.y, point.z)) for point in construction_vertices]
+        result_faces = [tuple(reversed(face)) for face in result_faces]
+
+    base_instance = str(update_label or panel_id)
+    instance_id = f"{base_instance}:{mirror_side}" if mirror_side else base_instance
     return PanelGeometry(
-        panel_id,
-        update_label,
-        result_vertices,
-        [vertex.copy() for vertex in result_vertices],
-        list(edges),
-        triangles,
-        edge_meta,
+        panel_id=panel_id,
+        update_label=update_label,
+        instance_id=instance_id,
+        mirror_side=mirror_side,
+        vertices=[point.copy() for point in construction_vertices],
+        construction_vertices=[point.copy() for point in construction_vertices],
+        pattern_vertices=[point.copy() for point in pattern_vertices],
+        edges=result_edges,
+        faces=result_faces,
+        edge_meta=edge_meta,
+        edge_rest=edge_rest,
+        ring_closed=ring_closed,
     )
+
+
+def _panel_geometries(panels: list[dict[str, Any]], spacing: float) -> list[PanelGeometry]:
+    result: list[PanelGeometry] = []
+    for panel in panels:
+        if bool(panel.get("mirror", False)):
+            result.append(_triangulate_panel(panel, spacing, "LEFT"))
+            result.append(_triangulate_panel(panel, spacing, "RIGHT"))
+        else:
+            result.append(_triangulate_panel(panel, spacing))
+    return result
 
 
 def _pack_panels(panels: list[PanelGeometry], gap: float) -> None:
@@ -327,14 +575,15 @@ def _pack_panels(panels: list[PanelGeometry], gap: float) -> None:
         (
             min(vertex.x for vertex in panel.vertices),
             max(vertex.x for vertex in panel.vertices),
-            min(vertex.y for vertex in panel.vertices),
+            min(vertex.z for vertex in panel.vertices),
+            (min(vertex.y for vertex in panel.vertices) + max(vertex.y for vertex in panel.vertices)) * 0.5,
         )
         for panel in panels
     ]
-    total_width = sum(max_x - min_x for min_x, max_x, _min_y in bounds) + gap * max(0, len(panels) - 1)
+    total_width = sum(max_x - min_x for min_x, max_x, _min_z, _center_y in bounds) + gap * max(0, len(panels) - 1)
     cursor = -total_width / 2.0
-    for panel, (min_x, max_x, min_y) in zip(panels, bounds):
-        shift = Vector((cursor - min_x, BOTTOM_Z_M - min_y))
+    for panel, (min_x, max_x, min_z, center_y) in zip(panels, bounds):
+        shift = Vector((cursor - min_x, WORLD_Y_M - center_y, BOTTOM_Z_M - min_z))
         for vertex in panel.vertices:
             vertex += shift
         cursor += max_x - min_x + gap
@@ -373,6 +622,13 @@ def _write_panel_mesh_attributes(
         _set_boolean_edge_attribute(mesh, f"sewing_{label}", indices)
     _set_boolean_edge_attribute(mesh, "fold", fold_edges)
 
+    rest_attribute = mesh.attributes.new(name="yohsai_pattern_edge_rest", type="FLOAT", domain="EDGE")
+    for key, value in panel.edge_rest.items():
+        edge_index = mesh_edge_lookup.get(key)
+        if edge_index is None:
+            raise MeshLoadError("A pattern rest edge was lost while creating the Blender mesh.")
+        rest_attribute.data[edge_index].value = value
+
     panel_attribute = mesh.attributes.new(name="panel_index", type="INT", domain="FACE")
     for polygon in mesh.polygons:
         panel_attribute.data[polygon.index].value = panel_index
@@ -380,6 +636,12 @@ def _write_panel_mesh_attributes(
     pattern_attribute = mesh.attributes.new(name="yohsai_pattern_position", type="FLOAT_VECTOR", domain="POINT")
     for item, point in zip(pattern_attribute.data, panel.pattern_vertices):
         item.vector = (point.x, point.y, 0.0)
+
+    construction_attribute = mesh.attributes.new(
+        name="yohsai_construction_position", type="FLOAT_VECTOR", domain="POINT"
+    )
+    for item, point in zip(construction_attribute.data, panel.construction_vertices):
+        item.vector = point
 
 
 def _sewing_signature(document: dict[str, Any]) -> str:
@@ -399,7 +661,25 @@ def _sewing_signature(document: dict[str, Any]) -> str:
             except (KeyError, TypeError, ValueError) as exc:
                 raise MeshLoadError("Yohsai JSON has an invalid sewing reference.") from exc
         normalized[label.upper()] = sorted(values)
-    return json.dumps(normalized, sort_keys=True, separators=(",", ":"))
+    panels = document.get("panels")
+    if not isinstance(panels, list):
+        raise MeshLoadError("Yohsai JSON has no panels array.")
+    construction: list[dict[str, object]] = []
+    for panel in panels:
+        if not isinstance(panel, dict):
+            raise MeshLoadError("Yohsai JSON contains an invalid panel.")
+        segments = panel.get("segments")
+        if not isinstance(segments, list):
+            raise MeshLoadError("Yohsai JSON contains an invalid panel segment array.")
+        construction.append({
+            "id": str(panel.get("id", "")),
+            "mirror": bool(panel.get("mirror", False)),
+            "top": panel.get("top"),
+            "ring": [index for index, segment in enumerate(segments) if bool(segment.get("ring", False))],
+        })
+    return json.dumps(
+        {"groups": normalized, "construction": construction}, sort_keys=True, separators=(",", ":")
+    )
 
 
 def create_clothes_mesh(context, document: dict[str, Any]) -> bpy.types.Collection:
@@ -413,7 +693,9 @@ def create_clothes_mesh(context, document: dict[str, Any]) -> bpy.types.Collecti
     if not isinstance(source, dict) or not isinstance(panels_json, list) or not panels_json:
         raise MeshLoadError("Yohsai JSON has no valid source or panels.")
 
-    panels = [_triangulate_panel(panel, MESH_SPACING_M) for panel in panels_json]
+    if not all(isinstance(panel, dict) for panel in panels_json):
+        raise MeshLoadError("Yohsai JSON contains an invalid panel.")
+    panels = _panel_geometries(panels_json, MESH_SPACING_M)
     _pack_panels(panels, PANEL_GAP_M)
 
     name = _next_clothes_name()
@@ -427,14 +709,17 @@ def create_clothes_mesh(context, document: dict[str, Any]) -> bpy.types.Collecti
             obj = bpy.data.objects.new(object_name, mesh)
             collection.objects.link(obj)
             created_objects.append(obj)
-            center_x = (min(vertex.x for vertex in panel.vertices) + max(vertex.x for vertex in panel.vertices)) / 2.0
-            center_z = (min(vertex.y for vertex in panel.vertices) + max(vertex.y for vertex in panel.vertices)) / 2.0
-            vertices = [(vertex.x - center_x, 0.0, vertex.y - center_z) for vertex in panel.vertices]
+            center = Vector((
+                (min(vertex.x for vertex in panel.vertices) + max(vertex.x for vertex in panel.vertices)) / 2.0,
+                (min(vertex.y for vertex in panel.vertices) + max(vertex.y for vertex in panel.vertices)) / 2.0,
+                (min(vertex.z for vertex in panel.vertices) + max(vertex.z for vertex in panel.vertices)) / 2.0,
+            ))
+            vertices = [tuple(vertex - center) for vertex in panel.vertices]
             mesh.from_pydata(vertices, panel.edges, panel.faces)
             mesh.validate(verbose=False, clean_customdata=False)
             mesh.update(calc_edges=True, calc_edges_loose=True)
             _write_panel_mesh_attributes(mesh, panel, panel_index)
-            obj.location = (center_x, WORLD_Y_M, center_z)
+            obj.location = center
 
             obj["yohsai_schema"] = "yohsai-pattern/1.0.0"
             obj["yohsai_role"] = "part"
@@ -443,7 +728,10 @@ def create_clothes_mesh(context, document: dict[str, Any]) -> bpy.types.Collecti
             obj["yohsai_mesh_spacing_m"] = MESH_SPACING_M
             obj["yohsai_panel_id"] = panel.panel_id
             obj["yohsai_panel_label"] = panel.update_label or ""
+            obj["yohsai_panel_instance"] = panel.instance_id
             obj["yohsai_panel_index"] = panel_index
+            obj["yohsai_mirror_side"] = panel.mirror_side
+            obj["yohsai_ring_closed"] = panel.ring_closed
 
         collection["yohsai_schema"] = "yohsai-pattern/1.0.0"
         collection["yohsai_role"] = "clothes"
@@ -478,12 +766,45 @@ def _pattern_positions(obj: bpy.types.Object) -> list[Vector]:
     return [Vector((item.vector[0], item.vector[1])) for item in attribute.data]
 
 
+def _construction_positions(obj: bpy.types.Object) -> list[Vector]:
+    attribute = obj.data.attributes.get("yohsai_construction_position")
+    if attribute is None or attribute.domain != "POINT" or len(attribute.data) != len(obj.data.vertices):
+        raise UpdateError(
+            f"{obj.name} has no construction coordinates. Load it again with the current Yohsai version."
+        )
+    return [Vector(item.vector) for item in attribute.data]
+
+
 def _transfer_deformation(obj: bpy.types.Object, panel: PanelGeometry) -> list[Vector]:
     old_flat = _pattern_positions(obj)
     old_faces = [tuple(polygon.vertices) for polygon in obj.data.polygons]
     if not old_faces:
         raise UpdateError(f"{obj.name} has no faces for deformation transfer.")
     old_world = [obj.matrix_world @ vertex.co for vertex in obj.data.vertices]
+    if panel.ring_closed:
+        if not bool(obj.get("yohsai_ring_closed", False)):
+            raise UpdateError(f"Panel #{panel.update_label} changed from flat to RING construction; load it again.")
+        old_construction = _construction_positions(obj)
+        bvh = BVHTree.FromPolygons(old_construction, old_faces, all_triangles=False)
+        transferred: list[Vector] = []
+        for point in panel.construction_vertices:
+            location, _normal, face_index, _distance = bvh.find_nearest(point)
+            if face_index is None or location is None:
+                raise UpdateError(f"Panel #{panel.update_label} could not transfer its RING deformation.")
+            face = old_faces[int(face_index)]
+            if len(face) != 3:
+                raise UpdateError(f"{obj.name} contains a non-triangular face.")
+            a, b, c = face
+            transferred.append(
+                barycentric_transform(
+                    location,
+                    old_construction[a], old_construction[b], old_construction[c],
+                    old_world[a], old_world[b], old_world[c],
+                )
+            )
+        return transferred
+    if bool(obj.get("yohsai_ring_closed", False)):
+        raise UpdateError(f"Panel #{panel.update_label} removed its RING construction; load it again.")
     old_min = Vector((min(point.x for point in old_flat), min(point.y for point in old_flat)))
     old_max = Vector((max(point.x for point in old_flat), max(point.y for point in old_flat)))
     new_min = Vector((min(point.x for point in panel.pattern_vertices), min(point.y for point in panel.pattern_vertices)))
@@ -539,34 +860,37 @@ def update_clothes_mesh(context, collection: bpy.types.Collection, document: dic
         (obj for obj in collection.objects if obj.type == "MESH" and obj.get("yohsai_role") == "part"),
         key=lambda obj: int(obj.get("yohsai_panel_index", 0)),
     )
-    if len(parts) != len(panels_json):
-        raise UpdateError(f"Panel object count changed: expected {len(parts)}, found {len(panels_json)}.")
-    old_by_label: dict[str, bpy.types.Object] = {}
+    if not all(isinstance(panel, dict) for panel in panels_json):
+        raise UpdateError("Updated Yohsai JSON contains an invalid panel.")
+    panels = _panel_geometries(panels_json, MESH_SPACING_M)
+    if len(parts) != len(panels):
+        raise UpdateError(f"Panel object count changed: expected {len(parts)}, found {len(panels)}.")
+    old_by_instance: dict[str, bpy.types.Object] = {}
     for obj in parts:
         label = str(obj.get("yohsai_panel_label", ""))
         if not label:
             raise UpdateError(f"{obj.name} has no # panel label. Load the labeled pattern again first.")
-        if label in old_by_label:
-            raise UpdateError(f"Existing panel label #{label} is duplicated.")
-        old_by_label[label] = obj
+        instance_id = str(obj.get("yohsai_panel_instance", label))
+        if instance_id in old_by_instance:
+            raise UpdateError(f"Existing panel instance {instance_id!r} is duplicated.")
+        old_by_instance[instance_id] = obj
 
-    panels = [_triangulate_panel(panel, MESH_SPACING_M) for panel in panels_json]
-    new_by_label: dict[str, PanelGeometry] = {}
+    new_by_instance: dict[str, PanelGeometry] = {}
     for panel in panels:
         if not panel.update_label:
             raise UpdateError(f"Updated panel {panel.panel_id!r} has no # label.")
-        if panel.update_label in new_by_label:
-            raise UpdateError(f"Updated panel label #{panel.update_label} is duplicated.")
-        new_by_label[panel.update_label] = panel
-    if set(old_by_label) != set(new_by_label):
-        missing = sorted(set(old_by_label) - set(new_by_label))
-        unexpected = sorted(set(new_by_label) - set(old_by_label))
-        raise UpdateError(f"Panel labels changed; missing={missing}, unexpected={unexpected}.")
+        if panel.instance_id in new_by_instance:
+            raise UpdateError(f"Updated panel instance {panel.instance_id!r} is duplicated.")
+        new_by_instance[panel.instance_id] = panel
+    if set(old_by_instance) != set(new_by_instance):
+        missing = sorted(set(old_by_instance) - set(new_by_instance))
+        unexpected = sorted(set(new_by_instance) - set(old_by_instance))
+        raise UpdateError(f"Panel labels changed or mirror instances changed; missing={missing}, unexpected={unexpected}.")
 
     prepared: list[tuple[bpy.types.Object, bpy.types.Mesh, PanelGeometry]] = []
     try:
-        for label, obj in old_by_label.items():
-            panel = new_by_label[label]
+        for instance_id, obj in old_by_instance.items():
+            panel = new_by_instance[instance_id]
             world_positions = _transfer_deformation(obj, panel)
             inverse = obj.matrix_world.inverted_safe()
             local_positions = [inverse @ point for point in world_positions]
@@ -592,6 +916,9 @@ def update_clothes_mesh(context, collection: bpy.types.Collection, document: dic
         obj["yohsai_mesh_spacing_m"] = MESH_SPACING_M
         obj["yohsai_panel_id"] = panel.panel_id
         obj["yohsai_panel_label"] = panel.update_label
+        obj["yohsai_panel_instance"] = panel.instance_id
+        obj["yohsai_mirror_side"] = panel.mirror_side
+        obj["yohsai_ring_closed"] = panel.ring_closed
         obj.hide_set(False)
         obj.hide_render = False
     _remove_sewn_preview(collection)
@@ -615,6 +942,8 @@ class _SeamChain:
     obj: bpy.types.Object
     vertices: tuple[int, ...]
     world_points: tuple[Vector, ...]
+    edge_lengths: tuple[float, ...]
+    closed: bool
 
 
 def _sewing_labels(mesh: bpy.types.Mesh) -> set[str]:
@@ -637,10 +966,21 @@ def _seam_chains(obj: bpy.types.Object, label: str) -> list[_SeamChain]:
         return []
 
     adjacency: dict[int, set[int]] = {}
+    rest_attribute = mesh.attributes.get("yohsai_pattern_edge_rest")
+    valid_rest = (
+        rest_attribute is not None
+        and rest_attribute.domain == "EDGE"
+        and len(rest_attribute.data) == len(mesh.edges)
+    )
+    rest_by_edge: dict[tuple[int, int], float] = {}
     for edge in marked_edges:
         a, b = edge.vertices
         adjacency.setdefault(a, set()).add(b)
         adjacency.setdefault(b, set()).add(a)
+        rest_by_edge[_edge_key(a, b)] = (
+            float(rest_attribute.data[edge.index].value)
+            if valid_rest else (mesh.vertices[a].co - mesh.vertices[b].co).length
+        )
     if any(len(neighbors) > 2 for neighbors in adjacency.values()):
         raise SewingError(f"Sewing group {label} branches on {obj.name}.")
 
@@ -657,24 +997,53 @@ def _seam_chains(obj: bpy.types.Object, label: str) -> list[_SeamChain]:
             remaining.discard(vertex)
             pending.extend(adjacency[vertex] - component)
         endpoints = sorted(vertex for vertex in component if len(adjacency[vertex]) == 1)
-        if len(endpoints) != 2:
-            raise SewingError(f"Sewing group {label} is not an open continuous path on {obj.name}.")
-        ordered = [endpoints[0]]
-        previous = None
-        current = endpoints[0]
-        while current != endpoints[1]:
-            candidates = adjacency[current] - ({previous} if previous is not None else set())
-            if len(candidates) != 1:
-                raise SewingError(f"Cannot order sewing group {label} on {obj.name}.")
-            following = next(iter(candidates))
-            ordered.append(following)
-            previous, current = current, following
+        closed = not endpoints
+        if not closed and len(endpoints) != 2:
+            raise SewingError(f"Sewing group {label} is not a continuous path on {obj.name}.")
+        if closed:
+            if any(len(adjacency[vertex]) != 2 for vertex in component):
+                raise SewingError(f"Sewing group {label} is not a simple closed path on {obj.name}.")
+            start = min(component)
+            ordered = [start]
+            previous = None
+            current = start
+            while True:
+                candidates = adjacency[current] - ({previous} if previous is not None else set())
+                if previous is None:
+                    following = min(candidates)
+                else:
+                    following = next(iter(candidates))
+                if following == start:
+                    break
+                if following in ordered:
+                    raise SewingError(f"Cannot order closed sewing group {label} on {obj.name}.")
+                ordered.append(following)
+                previous, current = current, following
+            if set(ordered) != component:
+                raise SewingError(f"Cannot order closed sewing group {label} on {obj.name}.")
+        else:
+            ordered = [endpoints[0]]
+            previous = None
+            current = endpoints[0]
+            while current != endpoints[1]:
+                candidates = adjacency[current] - ({previous} if previous is not None else set())
+                if len(candidates) != 1:
+                    raise SewingError(f"Cannot order sewing group {label} on {obj.name}.")
+                following = next(iter(candidates))
+                ordered.append(following)
+                previous, current = current, following
         points = tuple(obj.matrix_world @ mesh.vertices[index].co for index in ordered)
-        chains.append(_SeamChain(obj, tuple(ordered), points))
+        pairs = list(zip(ordered, ordered[1:]))
+        if closed:
+            pairs.append((ordered[-1], ordered[0]))
+        edge_lengths = tuple(rest_by_edge[_edge_key(a, b)] for a, b in pairs)
+        chains.append(_SeamChain(obj, tuple(ordered), points, edge_lengths, closed))
     return chains
 
 
 def _direction_cost(left: _SeamChain, right: _SeamChain, reverse: bool) -> float:
+    if left.closed or right.closed:
+        raise SewingError("Closed sewing paths require circular matching.")
     right_start = right.world_points[-1] if reverse else right.world_points[0]
     right_end = right.world_points[0] if reverse else right.world_points[-1]
     return (left.world_points[0] - right_start).length + (left.world_points[-1] - right_end).length
@@ -698,28 +1067,33 @@ def _pair_chains(left: list[_SeamChain], right: list[_SeamChain], label: str) ->
     return [(left_chain, right[right_index]) for left_chain, right_index in zip(left, candidates[0][1])]
 
 
-def _cumulative_positions(points: tuple[Vector, ...]) -> list[float]:
+def _cumulative_positions(edge_lengths: tuple[float, ...], vertex_count: int, closed: bool = False) -> list[float]:
     distances = [0.0]
-    for start, end in zip(points, points[1:]):
-        distances.append(distances[-1] + (end - start).length)
-    if distances[-1] <= 1.0e-10:
+    for length in edge_lengths[:vertex_count - 1]:
+        distances.append(distances[-1] + length)
+    total = sum(edge_lengths) if closed else distances[-1]
+    if total <= 1.0e-10:
         raise SewingError("A sewing path has zero length.")
-    return [distance / distances[-1] for distance in distances]
+    return [distance / total for distance in distances]
 
 
 def _ordered_vertex_pairs(left: _SeamChain, right: _SeamChain, label: str) -> list[tuple[int, int]]:
+    if left.closed or right.closed:
+        raise SewingError(f"Sewing group {label} mixes unsupported open and closed paths.")
     forward_cost = _direction_cost(left, right, False)
     reverse_cost = _direction_cost(left, right, True)
     if abs(forward_cost - reverse_cost) <= 1.0e-6:
         raise SewingError(f"Sewing direction for group {label} is ambiguous; move the parts closer to their intended seams.")
     right_vertices = list(right.vertices)
     right_points = right.world_points
+    right_lengths = right.edge_lengths
     if reverse_cost < forward_cost:
         right_vertices.reverse()
         right_points = tuple(reversed(right_points))
+        right_lengths = tuple(reversed(right_lengths))
 
-    left_positions = _cumulative_positions(left.world_points)
-    right_positions = _cumulative_positions(right_points)
+    left_positions = _cumulative_positions(left.edge_lengths, len(left.vertices))
+    right_positions = _cumulative_positions(right_lengths, len(right_vertices))
     pairs = [(left.vertices[0], right_vertices[0])]
     left_index = right_index = 0
     while left_index < len(left.vertices) - 1 or right_index < len(right_vertices) - 1:
@@ -736,6 +1110,162 @@ def _ordered_vertex_pairs(left: _SeamChain, right: _SeamChain, label: str) -> li
         if pair != pairs[-1]:
             pairs.append(pair)
     return pairs
+
+
+@dataclass(frozen=True)
+class _GlobalSeamPath:
+    vertices: tuple[int, ...]
+    world_points: tuple[Vector, ...]
+    edge_lengths: tuple[float, ...]
+
+
+def _closure_cost(first: _SeamChain, second: _SeamChain, reverse_second: bool) -> float:
+    if first.closed or second.closed:
+        raise SewingError("Only open paths can be joined into a composite sewing loop.")
+    second_start = second.world_points[-1] if reverse_second else second.world_points[0]
+    second_end = second.world_points[0] if reverse_second else second.world_points[-1]
+    return (
+        (first.world_points[-1] - second_start).length
+        + (second_end - first.world_points[0]).length
+    )
+
+
+def _global_chain(chain: _SeamChain, offset: int) -> _GlobalSeamPath:
+    return _GlobalSeamPath(
+        tuple(offset + vertex for vertex in chain.vertices),
+        chain.world_points,
+        chain.edge_lengths,
+    )
+
+
+def _composite_loop(
+    first: _SeamChain, second: _SeamChain, offsets: dict[bpy.types.Object, int]
+) -> _GlobalSeamPath:
+    reverse_second = _closure_cost(first, second, True) < _closure_cost(first, second, False)
+    second_vertices = list(second.vertices)
+    second_points = list(second.world_points)
+    second_lengths = list(second.edge_lengths)
+    if reverse_second:
+        second_vertices.reverse()
+        second_points.reverse()
+        second_lengths.reverse()
+    vertices = tuple(
+        [offsets[first.obj] + vertex for vertex in first.vertices]
+        + [offsets[second.obj] + vertex for vertex in second_vertices]
+    )
+    points = first.world_points + tuple(second_points)
+    # The two zero-length entries are virtual joins at the already sewn body
+    # endpoints. They close the parameter loop without adding pattern length.
+    lengths = first.edge_lengths + (0.0,) + tuple(second_lengths) + (0.0,)
+    return _GlobalSeamPath(vertices, points, lengths)
+
+
+def _reorder_closed_path(path: _GlobalSeamPath, order: list[int]) -> _GlobalSeamPath:
+    edge_lookup = {
+        _edge_key(path.vertices[index], path.vertices[(index + 1) % len(path.vertices)]): path.edge_lengths[index]
+        for index in range(len(path.vertices))
+    }
+    vertices = tuple(path.vertices[index] for index in order)
+    points = tuple(path.world_points[index] for index in order)
+    lengths = tuple(
+        edge_lookup[_edge_key(vertices[index], vertices[(index + 1) % len(vertices)])]
+        for index in range(len(vertices))
+    )
+    return _GlobalSeamPath(vertices, points, lengths)
+
+
+def _normalized_closed_pairs(left: _GlobalSeamPath, right: _GlobalSeamPath) -> list[tuple[int, int]]:
+    left_positions = _cumulative_positions(left.edge_lengths, len(left.vertices), True)
+    right_positions = _cumulative_positions(right.edge_lengths, len(right.vertices), True)
+    pairs = [(left.vertices[0], right.vertices[0])]
+    left_index = right_index = 0
+    while left_index < len(left.vertices) - 1 or right_index < len(right.vertices) - 1:
+        next_left = left_positions[left_index + 1] if left_index + 1 < len(left_positions) else math.inf
+        next_right = right_positions[right_index + 1] if right_index + 1 < len(right_positions) else math.inf
+        if abs(next_left - next_right) <= 1.0e-9:
+            left_index += 1
+            right_index += 1
+        elif next_left < next_right:
+            left_index += 1
+        else:
+            right_index += 1
+        pair = (left.vertices[left_index], right.vertices[right_index])
+        if pair != pairs[-1]:
+            pairs.append(pair)
+    return pairs
+
+
+def _circular_alignment(
+    left: _GlobalSeamPath, right: _GlobalSeamPath
+) -> tuple[float, list[tuple[int, int]]]:
+    best: tuple[float, list[tuple[int, int]]] | None = None
+    count = len(right.vertices)
+    for reverse in (False, True):
+        base = list(range(count)) if not reverse else list(reversed(range(count)))
+        for rotation in range(count):
+            order = base[rotation:] + base[:rotation]
+            candidate = _reorder_closed_path(right, order)
+            pairs = _normalized_closed_pairs(left, candidate)
+            left_points = {vertex: point for vertex, point in zip(left.vertices, left.world_points)}
+            right_points = {vertex: point for vertex, point in zip(candidate.vertices, candidate.world_points)}
+            cost = sum((left_points[a] - right_points[b]).length for a, b in pairs) / len(pairs)
+            if best is None or cost < best[0]:
+                best = (cost, pairs)
+    if best is None:
+        raise SewingError("Cannot align closed sewing paths.")
+    return best
+
+
+def _multipart_closed_pairs(
+    by_object: dict[bpy.types.Object, list[_SeamChain]],
+    offsets: dict[bpy.types.Object, int],
+    label: str,
+) -> list[tuple[int, int]]:
+    closed = [chain for chains in by_object.values() for chain in chains if chain.closed]
+    open_by_object = {
+        obj: [chain for chain in chains if not chain.closed]
+        for obj, chains in by_object.items()
+        if any(not chain.closed for chain in chains)
+    }
+    if not closed or len(open_by_object) != 2:
+        raise SewingError(
+            f"Sewing group {label} needs closed RING paths and open paths on exactly two body parts."
+        )
+    count = len(closed)
+    first_obj, second_obj = sorted(open_by_object, key=lambda obj: int(obj.get("yohsai_panel_index", 0)))
+    first = open_by_object[first_obj]
+    second = open_by_object[second_obj]
+    if len(first) != count or len(second) != count or count > 8:
+        raise SewingError(
+            f"Sewing group {label} cannot pair its {count} closed path(s) with the body paths."
+        )
+
+    body_candidates: list[tuple[float, tuple[int, ...]]] = []
+    for order in permutations(range(count)):
+        cost = sum(
+            min(_closure_cost(left, second[index], False), _closure_cost(left, second[index], True))
+            for left, index in zip(first, order)
+        )
+        body_candidates.append((cost, order))
+    body_candidates.sort(key=lambda item: item[0])
+    body_order = body_candidates[0][1]
+    body_loops = [
+        _composite_loop(left, second[index], offsets)
+        for left, index in zip(first, body_order)
+    ]
+    closed_loops = [_global_chain(chain, offsets[chain.obj]) for chain in closed]
+
+    assignments: list[tuple[float, tuple[int, ...], list[list[tuple[int, int]]]]] = []
+    for order in permutations(range(count)):
+        total = 0.0
+        pair_sets: list[list[tuple[int, int]]] = []
+        for body_loop, closed_index in zip(body_loops, order):
+            cost, pairs = _circular_alignment(body_loop, closed_loops[closed_index])
+            total += cost
+            pair_sets.append(pairs)
+        assignments.append((total, order, pair_sets))
+    assignments.sort(key=lambda item: item[0])
+    return [pair for pair_set in assignments[0][2] for pair in pair_set]
 
 
 @dataclass(frozen=True)
@@ -768,18 +1298,23 @@ def build_sewing_plan(collection: bpy.types.Collection) -> SewingPlan:
     spring_keys: set[tuple[int, int]] = set()
     for label in labels:
         by_object = {obj: chains for obj in parts if (chains := _seam_chains(obj, label))}
-        if len(by_object) != 2:
-            raise SewingError(f"Sewing group {label} must occur on exactly two different cloth parts.")
-        first_obj, second_obj = sorted(by_object, key=lambda obj: int(obj.get("yohsai_panel_index", 0)))
-        for left_chain, right_chain in _pair_chains(by_object[first_obj], by_object[second_obj], label):
-            for left_vertex, right_vertex in _ordered_vertex_pairs(left_chain, right_chain, label):
-                a = offsets[first_obj] + left_vertex
-                b = offsets[second_obj] + right_vertex
-                key = _edge_key(a, b)
-                if key in spring_keys:
-                    raise SewingError("Two sewing groups produce the same sewing spring.")
-                spring_keys.add(key)
-                connections.append((label, a, b))
+        if any(chain.closed for chains in by_object.values() for chain in chains):
+            pairs = _multipart_closed_pairs(by_object, offsets, label)
+        else:
+            if len(by_object) != 2:
+                raise SewingError(f"Sewing group {label} must occur on exactly two different cloth parts.")
+            first_obj, second_obj = sorted(by_object, key=lambda obj: int(obj.get("yohsai_panel_index", 0)))
+            pairs = [
+                (offsets[first_obj] + left_vertex, offsets[second_obj] + right_vertex)
+                for left_chain, right_chain in _pair_chains(by_object[first_obj], by_object[second_obj], label)
+                for left_vertex, right_vertex in _ordered_vertex_pairs(left_chain, right_chain, label)
+            ]
+        for a, b in pairs:
+            key = _edge_key(a, b)
+            if key in spring_keys:
+                raise SewingError("Two sewing groups produce the same sewing spring.")
+            spring_keys.add(key)
+            connections.append((label, a, b))
     return SewingPlan(parts, labels, tuple(connections))
 
 
