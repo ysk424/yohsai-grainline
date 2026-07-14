@@ -10,7 +10,7 @@ from pathlib import Path
 import numpy as np
 
 
-API_VERSION = 1
+API_VERSION = 2
 _ERROR_CAPACITY = 1024
 
 
@@ -29,6 +29,8 @@ class _Config(ctypes.Structure):
         ("iterations", ctypes.c_int32),
         ("stretch_stiffness", ctypes.c_float),
         ("bend_stiffness", ctypes.c_float),
+        ("quad_shear_stiffness", ctypes.c_float),
+        ("quad_area_stiffness", ctypes.c_float),
         ("straight_pair_cosine", ctypes.c_float),
         ("seam_projection_passes", ctypes.c_int32),
         ("velocity_damping_per_second", ctypes.c_float),
@@ -44,11 +46,14 @@ class _CreateDesc(ctypes.Structure):
         ("positions", FloatPointer),
         ("velocities", FloatPointer),
         ("rest_frame_positions", FloatPointer),
+        ("material_rest_positions", FloatPointer),
         ("inverse_masses", FloatPointer),
         ("locked", IntPointer),
         ("edge_count", ctypes.c_int32),
         ("edges", IntPointer),
         ("edge_rest_lengths", FloatPointer),
+        ("quad_count", ctypes.c_int32),
+        ("quads", IntPointer),
         ("seam_count", ctypes.c_int32),
         ("seams", IntPointer),
         ("face_count", ctypes.c_int32),
@@ -78,12 +83,15 @@ class _Stats(ctypes.Structure):
         ("iterations", ctypes.c_int32),
         ("segment_count", ctypes.c_int32),
         ("angle_count", ctypes.c_int32),
+        ("quad_count", ctypes.c_int32),
         ("body_candidate_count", ctypes.c_int32),
         ("self_candidate_count", ctypes.c_int32),
         ("maximum_displacement", ctypes.c_float),
         ("maximum_edge_strain", ctypes.c_float),
         ("stretch_energy", ctypes.c_float),
         ("bend_energy", ctypes.c_float),
+        ("shear_energy", ctypes.c_float),
+        ("area_energy", ctypes.c_float),
     ]
 
 
@@ -183,6 +191,7 @@ def _configure_library(library: ctypes.CDLL) -> None:
         ctypes.POINTER(ctypes.c_int32),
         ctypes.POINTER(ctypes.c_int32),
         ctypes.POINTER(ctypes.c_int32),
+        ctypes.POINTER(ctypes.c_int32),
         ctypes.c_char_p,
         ctypes.c_int32,
     ]
@@ -250,8 +259,10 @@ class NativeCosseratRuntime:
         positions,
         velocities,
         rest_frame_positions,
+        material_rest_positions,
         edges,
         edge_rest,
+        quads,
         seams,
         faces,
         body,
@@ -261,13 +272,18 @@ class NativeCosseratRuntime:
         self._handle = ctypes.c_void_p()
         self.vertex_count = int(len(positions))
         self.segment_count = int(len(edges))
+        self.quad_count = int(len(quads))
         self.seam_count = int(len(seams))
 
         positions_array = _float_array(positions, (self.vertex_count, 3), "positions")
         velocities_array = _float_array(velocities, (self.vertex_count, 3), "velocities")
         rest_array = _float_array(rest_frame_positions, (self.vertex_count, 3), "rest frame positions")
+        material_rest_array = _float_array(
+            material_rest_positions, (self.vertex_count, 3), "material rest positions"
+        )
         edges_array = _int_array(edges, 2, "edges")
         edge_rest_array = _float_array(edge_rest, (self.segment_count,), "edge rest lengths")
+        quads_array = _int_array(quads, 4, "quads")
         seams_array = _int_array(seams, 2, "seams")
         faces_array = _int_array(faces, 3, "faces")
         body_vertices = _float_array(body.vertices, (len(body.vertices), 3), "Body vertices")
@@ -286,11 +302,14 @@ class NativeCosseratRuntime:
             _float_pointer(positions_array),
             _float_pointer(velocities_array),
             _float_pointer(rest_array),
+            _float_pointer(material_rest_array),
             _float_pointer(inverse_masses),
             _int_pointer(locked_array),
             self.segment_count,
             _int_pointer(edges_array),
             _float_pointer(edge_rest_array),
+            self.quad_count,
+            _int_pointer(quads_array),
             self.seam_count,
             _int_pointer(seams_array),
             len(faces_array),
@@ -307,6 +326,7 @@ class NativeCosseratRuntime:
         vertex_count = ctypes.c_int32()
         segment_count = ctypes.c_int32()
         angle_count = ctypes.c_int32()
+        quad_count = ctypes.c_int32()
         seam_count = ctypes.c_int32()
         self._call(
             "ysc_get_counts",
@@ -314,9 +334,15 @@ class NativeCosseratRuntime:
             ctypes.byref(vertex_count),
             ctypes.byref(segment_count),
             ctypes.byref(angle_count),
+            ctypes.byref(quad_count),
             ctypes.byref(seam_count),
         )
-        if vertex_count.value != self.vertex_count or segment_count.value != self.segment_count:
+        if (
+            vertex_count.value != self.vertex_count
+            or segment_count.value != self.segment_count
+            or quad_count.value != self.quad_count
+            or seam_count.value != self.seam_count
+        ):
             self.close()
             raise NativeCosseratError("Native solver count validation failed.")
         self.angle_count = int(angle_count.value)

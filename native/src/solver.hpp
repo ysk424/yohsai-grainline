@@ -17,6 +17,7 @@ public:
     [[nodiscard]] int32_t vertex_count() const noexcept;
     [[nodiscard]] int32_t segment_count() const noexcept;
     [[nodiscard]] int32_t angle_count() const noexcept;
+    [[nodiscard]] int32_t quad_count() const noexcept;
     [[nodiscard]] int32_t seam_count() const noexcept;
 
     void replace_state(
@@ -67,22 +68,36 @@ private:
         float maximum_length = 0.0F;
     };
 
+    struct Quad {
+        std::array<int32_t, 4> vertices{};
+        float rest_product = 0.0F;
+        float rest_shear = 0.0F;
+        float rest_area = 0.0F;
+        float shear_stiffness = 0.0F;
+        float area_stiffness = 0.0F;
+        Vec3 rest_normal;
+    };
+
     using Face = std::array<int32_t, 3>;
 
     ysc_config config_{};
     std::vector<Vertex> vertices_;
     std::vector<Vec3> rest_positions_;
+    std::vector<Vec3> material_rest_positions_;
     std::vector<Segment> segments_;
     std::vector<Angle> angles_;
+    std::vector<Quad> quads_;
     std::vector<Seam> seams_;
     std::vector<Face> faces_;
     std::vector<Vec3> body_positions_;
     std::vector<Face> body_faces_;
     std::vector<std::vector<int32_t>> vertex_segments_;
+    std::vector<std::vector<int32_t>> vertex_quads_;
     std::vector<std::vector<int32_t>> segment_angles_;
 
     void validate_config() const;
     void build_segments(const ysc_create_desc& desc);
+    void build_quads(const ysc_create_desc& desc);
     void build_angles();
     void initialize_orientations_from_geometry();
     [[nodiscard]] std::vector<Vec3> geometry_vertex_normals(const std::vector<Vec3>& positions) const;
@@ -102,7 +117,7 @@ private:
         const Vec3& b,
         const Vec3& c) const;
     [[nodiscard]] float maximum_edge_strain() const;
-    void compute_energy(float& stretch, float& bend) const;
+    void compute_energy(float& stretch, float& bend, float& shear, float& area) const;
     void require_finite_state() const;
 };
 

@@ -74,7 +74,14 @@ try:
     for panel_index, obj in enumerate(parts):
         mesh = obj.data
         attribute_names = set(mesh.attributes.keys())
-        assert {"sewing_A", "sewing_B", "fold", "panel_index"} <= attribute_names
+        assert {
+            "sewing_A",
+            "sewing_B",
+            "fold",
+            "panel_index",
+            mesh_loader.GRAINLINE_EDGE_FAMILY_ATTRIBUTE,
+            mesh_loader.GRAINLINE_FACE_QUAD_ATTRIBUTE,
+        } <= attribute_names
         assert sum(item.value for item in mesh.attributes["sewing_A"].data) > 0
         assert sum(item.value for item in mesh.attributes["sewing_B"].data) > 0
         assert sum(item.value for item in mesh.attributes["fold"].data) > 0
@@ -144,6 +151,9 @@ try:
     ]
     kitsuke_result = bpy.ops.yohsai.kitsuke()
     assert kitsuke_result == {"FINISHED"}, bpy.context.scene.yohsai.parse_status
+    session = kitsuke_module._sessions[collection.as_pointer()]
+    assert session.runtime.quad_count == len(session.quads) > 0
+    assert len(session.edges) < len(session.all_edges)
     assert not any(obj.get("yohsai_role") == "sewn" for obj in collection.objects)
     assert all(not obj.hide_get() and not obj.hide_render for obj in parts)
     after = [

@@ -10,7 +10,13 @@ from mathutils import Matrix, Vector
 from mathutils.bvhtree import BVHTree
 
 from .cosserat_native import NativeCosseratError, NativeCosseratRuntime
-from .mesh_loader import SewingError, build_sewing_plan
+from .mesh_loader import (
+    GRAINLINE_EDGE_FAMILY_ATTRIBUTE,
+    GRAINLINE_EDGE_PROXY,
+    GRAINLINE_FACE_QUAD_ATTRIBUTE,
+    SewingError,
+    build_sewing_plan,
+)
 
 
 TIME_STEP = 1.0 / 240.0
@@ -165,11 +171,28 @@ def _write_velocity_state(part: _PartRange, velocities: np.ndarray) -> None:
     attribute.data.foreach_set("vector", np.asarray(velocities, dtype=np.float32).ravel())
 
 
+def _structural_edge_indices(mesh: bpy.types.Mesh) -> np.ndarray:
+    attribute = mesh.attributes.get(GRAINLINE_EDGE_FAMILY_ATTRIBUTE)
+    if attribute is None:
+        # Meshes loaded by 0.4.1 remain usable as the triangular baseline.
+        return np.arange(len(mesh.edges), dtype=np.int32)
+    if (
+        attribute.domain != "EDGE"
+        or attribute.data_type != "INT"
+        or len(attribute.data) != len(mesh.edges)
+    ):
+        raise KitsukeError("The grainline edge-family attribute is invalid. Load the pattern again.")
+    families = np.empty(len(mesh.edges), dtype=np.int32)
+    attribute.data.foreach_get("value", families)
+    return np.flatnonzero(families != GRAINLINE_EDGE_PROXY).astype(np.int32)
+
+
 def _read_orientation_state(parts: list[_PartRange]) -> np.ndarray:
     blocks: list[np.ndarray] = []
     for part in parts:
         components: list[np.ndarray] = []
         edge_count = len(part.obj.data.edges)
+        structural = _structural_edge_indices(part.obj.data)
         for name in _ORIENTATION_ATTRIBUTES:
             attribute = part.obj.data.attributes.get(name)
             if (
@@ -181,7 +204,7 @@ def _read_orientation_state(parts: list[_PartRange]) -> np.ndarray:
                 raise KitsukeError(f"{part.obj.name} has no valid Stable Cosserat orientation state for Undo recovery.")
             values = np.empty(edge_count, dtype=np.float32)
             attribute.data.foreach_get("value", values)
-            components.append(values)
+            components.append(values[structural])
         block = np.stack(components, axis=1)
         norms = np.linalg.norm(block, axis=1)
         if not np.all(np.isfinite(block)) or np.any(norms < 0.99) or np.any(norms > 1.01):
@@ -192,13 +215,14 @@ def _read_orientation_state(parts: list[_PartRange]) -> np.ndarray:
 
 def _write_orientation_state(parts: list[_PartRange], orientations: np.ndarray) -> None:
     values = np.asarray(orientations, dtype=np.float32)
-    expected = sum(len(part.obj.data.edges) for part in parts)
+    expected = sum(len(_structural_edge_indices(part.obj.data)) for part in parts)
     if values.shape != (expected, 4) or not np.all(np.isfinite(values)):
         raise KitsukeError("Stable Cosserat returned an invalid orientation state.")
     offset = 0
     for part in parts:
         mesh = part.obj.data
-        count = len(mesh.edges)
+        structural = _structural_edge_indices(mesh)
+        count = len(structural)
         block = values[offset : offset + count]
         for component, name in enumerate(_ORIENTATION_ATTRIBUTES):
             attribute = mesh.attributes.get(name)
@@ -207,7 +231,11 @@ def _write_orientation_state(parts: list[_PartRange], orientations: np.ndarray) 
                 attribute = None
             if attribute is None:
                 attribute = mesh.attributes.new(name=name, type="FLOAT", domain="EDGE")
-            attribute.data.foreach_set("value", block[:, component])
+            all_values = np.zeros(len(mesh.edges), dtype=np.float32)
+            if component == 0:
+                all_values.fill(1.0)
+            all_values[structural] = block[:, component]
+            attribute.data.foreach_set("value", all_values)
         offset += count
 
 
@@ -274,7 +302,8 @@ def _edge_constraints(parts: list[_PartRange], rest_positions: np.ndarray) -> tu
             and attribute.domain == "EDGE"
             and len(attribute.data) == len(part.obj.data.edges)
         )
-        for edge in part.obj.data.edges:
+        for edge_index in _structural_edge_indices(part.obj.data):
+            edge = part.obj.data.edges[int(edge_index)]
             a = part.start + edge.vertices[0]
             b = part.start + edge.vertices[1]
             edges.append((a, b))
@@ -285,6 +314,83 @@ def _edge_constraints(parts: list[_PartRange], rest_positions: np.ndarray) -> tu
     indices = np.asarray(edges, dtype=np.int32).reshape((-1, 2))
     rest = np.asarray(rest_values, dtype=np.float32)
     return indices, rest
+
+
+def _all_mesh_edges(parts: list[_PartRange]) -> np.ndarray:
+    edges = [
+        (part.start + edge.vertices[0], part.start + edge.vertices[1])
+        for part in parts
+        for edge in part.obj.data.edges
+    ]
+    return np.asarray(edges, dtype=np.int32).reshape((-1, 2))
+
+
+def _quad_constraints(parts: list[_PartRange], rest_positions: np.ndarray) -> np.ndarray:
+    quads: list[tuple[int, int, int, int]] = []
+    for part in parts:
+        mesh = part.obj.data
+        attribute = mesh.attributes.get(GRAINLINE_FACE_QUAD_ATTRIBUTE)
+        if attribute is None:
+            continue
+        if (
+            attribute.domain != "FACE"
+            or attribute.data_type != "INT"
+            or len(attribute.data) != len(mesh.polygons)
+        ):
+            raise KitsukeError(f"{part.obj.name} has an invalid grainline quad attribute. Load it again.")
+        groups: dict[int, list[tuple[int, int, int]]] = {}
+        for polygon in mesh.polygons:
+            quad_index = int(attribute.data[polygon.index].value)
+            if quad_index < 0:
+                continue
+            if len(polygon.vertices) != 3:
+                raise KitsukeError(f"{part.obj.name} has a non-triangular grainline proxy face.")
+            groups.setdefault(quad_index, []).append(tuple(polygon.vertices))
+
+        local_rest = rest_positions[part.start : part.start + part.count]
+        for quad_index, triangles in sorted(groups.items()):
+            if len(triangles) != 2:
+                raise KitsukeError(
+                    f"{part.obj.name} grainline quad {quad_index} does not contain exactly two proxy triangles."
+                )
+            vertices = set(triangles[0]) | set(triangles[1])
+            if len(vertices) != 4 or len(set(triangles[0]) & set(triangles[1])) != 2:
+                raise KitsukeError(f"{part.obj.name} grainline quad {quad_index} has invalid connectivity.")
+            xs = [float(local_rest[index, 0]) for index in vertices]
+            ys = [float(local_rest[index, 2]) for index in vertices]
+            min_x, max_x = min(xs), max(xs)
+            min_y, max_y = min(ys), max(ys)
+            width = max_x - min_x
+            height = max_y - min_y
+            if width <= 1.0e-8 or height <= 1.0e-8:
+                raise KitsukeError(f"{part.obj.name} grainline quad {quad_index} is degenerate.")
+            tolerance = max(width, height) * 1.0e-4 + 1.0e-7
+            targets = (
+                (min_x, min_y),
+                (max_x, min_y),
+                (max_x, max_y),
+                (min_x, max_y),
+            )
+            ordered: list[int] = []
+            for target_x, target_y in targets:
+                matches = [
+                    index
+                    for index in vertices
+                    if abs(float(local_rest[index, 0]) - target_x) <= tolerance
+                    and abs(float(local_rest[index, 2]) - target_y) <= tolerance
+                ]
+                if len(matches) != 1:
+                    raise KitsukeError(
+                        f"{part.obj.name} grainline quad {quad_index} is not aligned to page warp/weft."
+                    )
+                ordered.append(matches[0])
+            if len(set(ordered)) != 4:
+                raise KitsukeError(f"{part.obj.name} grainline quad {quad_index} has repeated corners.")
+            shared = set(triangles[0]) & set(triangles[1])
+            if shared not in ({ordered[0], ordered[2]}, {ordered[1], ordered[3]}):
+                raise KitsukeError(f"{part.obj.name} grainline quad {quad_index} has a non-diagonal split.")
+            quads.append(tuple(part.start + index for index in ordered))
+    return np.asarray(quads, dtype=np.int32).reshape((-1, 4))
 
 
 def _bending_constraints(parts: list[_PartRange], rest_positions: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
@@ -873,6 +979,8 @@ class _KitsukeSession:
         director_rest_positions = np.concatenate(director_rest_blocks).astype(np.float32)
         self.faces = np.asarray(faces, dtype=np.int32).reshape((-1, 3))
         self.edges, self.edge_rest = _edge_constraints(ranges, rest_positions)
+        self.all_edges = _all_mesh_edges(ranges)
+        self.quads = _quad_constraints(ranges, rest_positions)
         self.bends, self.bend_rest = _bending_constraints(ranges, rest_positions)
         if preview is not None:
             self.seams = _seam_constraints(preview, ranges)
@@ -896,8 +1004,10 @@ class _KitsukeSession:
                     self.positions,
                     self.velocities,
                     director_rest_positions,
+                    rest_positions,
                     self.edges,
                     self.edge_rest,
+                    self.quads,
                     self.seams,
                     self.faces,
                     self.body,
@@ -923,7 +1033,7 @@ class _KitsukeSession:
             self.runtime.replace_seam_state(persisted_seams)
             if backend == KITSUKE_BACKEND_STABLE_COSSERAT:
                 self.runtime.replace_orientation_state(_read_orientation_state(ranges))
-        exclusions = _self_exclusions(len(self.positions), self.faces, self.edges, self.seams)
+        exclusions = _self_exclusions(len(self.positions), self.faces, self.all_edges, self.seams)
         self.self_exclusions = exclusions
 
     def _read_user_transforms(self):
@@ -1130,7 +1240,8 @@ def advance_kitsuke(
         stats = session.runtime.last_stats
         return (
             f"Kitsuke: Stable Cosserat CPU, {STEPS_PER_CLICK} steps x {solver_iterations} iterations; "
-            f"{session.runtime.angle_count} rod joints, max strain {float(stats.get('maximum_edge_strain', 0.0)):.3g}; "
+            f"{session.runtime.quad_count} grain quads, {session.runtime.angle_count} rod joints, "
+            f"max strain {float(stats.get('maximum_edge_strain', 0.0)):.3g}; "
             f"seam {seam_closure * 1000.0:.3g} mm"
         )
     ti, _runtime = _ensure_taichi()

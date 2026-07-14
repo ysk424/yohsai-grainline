@@ -38,7 +38,7 @@ try:
     ui._poll_svg_parser()
 
     collection = bpy.context.scene.yohsai.clothes_collection
-    assert collection is not None
+    assert collection is not None, bpy.context.scene.yohsai.parse_status
     parts = [
         obj
         for obj in collection.objects
@@ -46,6 +46,69 @@ try:
     ]
     vertices = sum(len(obj.data.vertices) for obj in parts)
     faces = sum(len(obj.data.polygons) for obj in parts)
+    family_counts = {
+        mesh_loader.GRAINLINE_EDGE_PROXY: 0,
+        mesh_loader.GRAINLINE_EDGE_WARP: 0,
+        mesh_loader.GRAINLINE_EDGE_WEFT: 0,
+        mesh_loader.GRAINLINE_EDGE_TRANSITION: 0,
+    }
+    quad_count = 0
+    grid_cell_count = 0
+    for obj in parts:
+        mesh = obj.data
+        family = mesh.attributes.get(mesh_loader.GRAINLINE_EDGE_FAMILY_ATTRIBUTE)
+        quad = mesh.attributes.get(mesh_loader.GRAINLINE_FACE_QUAD_ATTRIBUTE)
+        pattern = mesh.attributes.get("yohsai_pattern_position")
+        assert family is not None and family.domain == "EDGE" and family.data_type == "INT"
+        assert quad is not None and quad.domain == "FACE" and quad.data_type == "INT"
+        assert pattern is not None and pattern.domain == "POINT"
+
+        groups = {}
+        for polygon in mesh.polygons:
+            quad_index = int(quad.data[polygon.index].value)
+            if quad_index >= 0:
+                groups.setdefault(quad_index, []).append(set(polygon.vertices))
+        edge_lookup = {tuple(sorted(edge.vertices)): edge.index for edge in mesh.edges}
+        proxy_edges = set()
+        for triangles in groups.values():
+            assert len(triangles) == 2
+            assert len(triangles[0] | triangles[1]) == 4
+            shared = tuple(sorted(triangles[0] & triangles[1]))
+            assert len(shared) == 2
+            edge_index = edge_lookup[shared]
+            assert int(family.data[edge_index].value) == mesh_loader.GRAINLINE_EDGE_PROXY
+            proxy_edges.add(edge_index)
+        quad_count += len(groups)
+
+        for edge in mesh.edges:
+            value = int(family.data[edge.index].value)
+            assert value in family_counts
+            family_counts[value] += 1
+            a, b = edge.vertices
+            delta_x = float(pattern.data[b].vector[0] - pattern.data[a].vector[0])
+            delta_y = float(pattern.data[b].vector[1] - pattern.data[a].vector[1])
+            if value == mesh_loader.GRAINLINE_EDGE_WARP:
+                assert abs(delta_x) < 1.0e-6 and abs(delta_y) > 1.0e-8
+            elif value == mesh_loader.GRAINLINE_EDGE_WEFT:
+                assert abs(delta_y) < 1.0e-6 and abs(delta_x) > 1.0e-8
+        assert proxy_edges == {
+            edge.index
+            for edge in mesh.edges
+            if int(family.data[edge.index].value) == mesh_loader.GRAINLINE_EDGE_PROXY
+        }
+        grid_coordinates = set()
+        for item in pattern.data:
+            scaled_x = float(item.vector[0]) / mesh_loader.MESH_SPACING_M
+            scaled_y = float(item.vector[1]) / mesh_loader.MESH_SPACING_M
+            grid_x, grid_y = round(scaled_x), round(scaled_y)
+            if abs(scaled_x - grid_x) < 1.0e-4 and abs(scaled_y - grid_y) < 1.0e-4:
+                grid_coordinates.add((grid_x, grid_y))
+        grid_cell_count += sum(
+            (grid_x + 1, grid_y) in grid_coordinates
+            and (grid_x + 1, grid_y + 1) in grid_coordinates
+            and (grid_x, grid_y + 1) in grid_coordinates
+            for grid_x, grid_y in grid_coordinates
+        )
 
     assert bpy.ops.yohsai.sewing() == {"FINISHED"}
     sewn = next(obj for obj in collection.objects if obj.get("yohsai_role") == "sewn")
@@ -58,13 +121,25 @@ try:
     elapsed = time.perf_counter() - started
 
     assert mesh_loader.MESH_SPACING_M == 0.005
-    assert vertices == 19_454
-    assert faces == 38_030
+    assert vertices == 16_948, (vertices, faces, quad_count, grid_cell_count, family_counts)
+    assert faces == 33_018, (vertices, faces, quad_count, grid_cell_count, family_counts)
+    assert quad_count == 15_102
+    assert grid_cell_count == 15_348
+    assert quad_count / grid_cell_count > 0.98
+    assert family_counts[mesh_loader.GRAINLINE_EDGE_PROXY] == quad_count
+    assert family_counts[mesh_loader.GRAINLINE_EDGE_WARP] == 15_626
+    assert family_counts[mesh_loader.GRAINLINE_EDGE_WEFT] == 15_365
+    assert family_counts[mesh_loader.GRAINLINE_EDGE_TRANSITION] == 3_871
     print(
         "YOHSAI_DENSITY_OK",
         f"parts={len(parts)}",
         f"verts={vertices}",
         f"faces={faces}",
+        f"quads={quad_count}",
+        f"grid_cells={grid_cell_count}",
+        f"warp={family_counts[mesh_loader.GRAINLINE_EDGE_WARP]}",
+        f"weft={family_counts[mesh_loader.GRAINLINE_EDGE_WEFT]}",
+        f"transition={family_counts[mesh_loader.GRAINLINE_EDGE_TRANSITION]}",
         f"springs={len(spring_edges)}",
         f"spacing_mm={mesh_loader.MESH_SPACING_M * 1000.0:g}",
         f"load_seconds={elapsed:.3f}",

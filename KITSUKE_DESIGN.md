@@ -5,11 +5,11 @@ Recorded: 2026-07-11 (Asia/Tokyo)
 Current tested package: Yohsai 0.3.0, Windows x64, Blender 5.2 / Python 3.13,
 Taichi 1.7.4
 
-> Yohsai 0.4.1 uses the native Stable Cosserat CPU backend by default and
+> Yohsai 0.5.0 uses the native Grainline Stable Cosserat CPU backend by default and
 > keeps this Taichi implementation as `Legacy Taichi PBD`. Product workflow
 > invariants in this document still apply; current solver construction,
 > parameters, contact behavior, tests, and licensing are in
-> `COSSERAT_DESIGN.md`.
+> `GRAINLINE_DESIGN.md` (with the v0.4 baseline in `COSSERAT_DESIGN.md`).
 
 ## 1. Product idea
 

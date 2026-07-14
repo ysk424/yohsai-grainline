@@ -17,7 +17,7 @@
 extern "C" {
 #endif
 
-#define YSC_API_VERSION 1
+#define YSC_API_VERSION 2
 
 typedef void* ysc_handle;
 
@@ -35,6 +35,8 @@ typedef struct ysc_config {
     int32_t iterations;
     float stretch_stiffness;
     float bend_stiffness;
+    float quad_shear_stiffness;
+    float quad_area_stiffness;
     float straight_pair_cosine;
     int32_t seam_projection_passes;
     float velocity_damping_per_second;
@@ -48,12 +50,16 @@ typedef struct ysc_create_desc {
     const float* positions;
     const float* velocities;
     const float* rest_frame_positions;
+    const float* material_rest_positions;
     const float* inverse_masses;
     const int32_t* locked;
 
     int32_t edge_count;
     const int32_t* edges;
     const float* edge_rest_lengths;
+
+    int32_t quad_count;
+    const int32_t* quads;
 
     int32_t seam_count;
     const int32_t* seams;
@@ -83,12 +89,15 @@ typedef struct ysc_stats {
     int32_t iterations;
     int32_t segment_count;
     int32_t angle_count;
+    int32_t quad_count;
     int32_t body_candidate_count;
     int32_t self_candidate_count;
     float maximum_displacement;
     float maximum_edge_strain;
     float stretch_energy;
     float bend_energy;
+    float shear_energy;
+    float area_energy;
 } ysc_stats;
 
 YSC_API int32_t ysc_get_api_version(void);
@@ -108,6 +117,7 @@ YSC_API ysc_status ysc_get_counts(
     int32_t* vertex_count,
     int32_t* segment_count,
     int32_t* angle_count,
+    int32_t* quad_count,
     int32_t* seam_count,
     char* error_message,
     int32_t error_capacity);

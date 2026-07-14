@@ -2,7 +2,7 @@
 
 Status: public development preview.
 
-Current version: 0.4.1.
+Current version: 0.5.0.
 
 The authoritative Kitsuke design, tuning log, known limitations, and resume
 checklist are maintained in `KITSUKE_DESIGN.md`.
@@ -24,6 +24,27 @@ project's XPBD and finite-element prototypes. This is qualitative owner
 feedback; it does not replace measured benchmarks or automated regression
 tests. The owner also reported lower-than-expected implementation time and
 model-token use.
+
+## 0.5.0 Grainline Material Lattice
+
+Version 0.5.0 retains the accepted 5 mm linear resolution but samples a global
+page-aligned square grid. Pattern vertical is warp and pattern horizontal is
+weft for every panel. Complete cells use four warp/weft Cosserat sides plus
+explicit quad shear and area energies; their Blender/collision diagonal is a
+non-structural proxy. Irregular cut boundaries retain a narrow triangular
+transition network. No per-panel grain annotation or inference was added.
+
+On `test2.pdf`, the two panels contain 16,948 vertices, 33,018 proxy triangles,
+15,102 material quads, and 448 sewing constraints. The material graph contains
+15,626 warp, 15,365 weft, and 3,871 boundary/transition segments; 15,102 proxy
+diagonals are excluded. The native ABI is version 2 and reports separate shear
+and area energy statistics.
+
+The native unit suite, Python bridge suite, density/axis validation, full
+Load/Sewing/Kitsuke/Update integration, mirrored RING sleeve test, and exact
+Undo replay all pass. The final full source integration suite took 288.065
+seconds and the density-only fixture took 4.878 seconds on the development machine. The
+solver remains single-threaded; these timings are local regression values.
 
 ## 0.4.1 Mesh Density
 
@@ -64,10 +85,11 @@ release.
 
 The Illustrator PDF pattern and its annotations are the source of truth.
 The implemented pipeline parses that pattern to fixed JSON, cuts separate
-triangular panel meshes, verifies Sewing, and incrementally dresses them with
-Kitsuke. Update recuts labeled panels while transferring only a useful initial
-3D placement. Future work must extend this pattern-designer workflow instead of
-treating Blender mesh identity as authoritative.
+grain-aligned material lattices with triangulated Blender proxies, verifies
+Sewing, and incrementally dresses them with Kitsuke. Update recuts labeled
+panels while transferring only a useful initial 3D placement. Future work must
+extend this pattern-designer workflow instead of treating Blender mesh identity
+as authoritative.
 
 ## Current State
 
@@ -84,9 +106,11 @@ treating Blender mesh identity as authoritative.
   supported.
 - Load expands fold-cut panels and `@M` mirror instances. Two `RING` boundaries
   are sampled equally and welded after `@TOP`-oriented tube construction. Load
-  creates one packed, cloth-ready triangular Mesh object per resulting instance
-  in a new numbered `CLOTHES_###` collection. Sewing and fold membership are
-  preserved as mesh attributes; RING is a reserved construction word.
+  creates one packed Mesh object per resulting instance in a new numbered
+  `CLOTHES_###` collection. Its 5 mm page-aligned square material cells retain
+  triangulated Blender/collision proxies and a narrow boundary transition.
+  Sewing and fold membership are preserved as mesh attributes; RING is a
+  reserved construction word.
 - `#` text inside a panel provides a normalized, human-authored identity for
   Update. Whitespace is removed; ASCII letters compare case-insensitively; and
   digits, underscore, and hyphen are accepted.
@@ -103,8 +127,9 @@ treating Blender mesh identity as authoritative.
   formed by its front and back body paths. The separate source parts remain
   hidden in the same collection for future update work.
 - `Kitsuke` treats the separate panel objects as the editable 3D realization.
-  The first click constructs transient native Stable Cosserat edge frames,
-  VBD positions, sewing, Body-contact, and self-contact state; later clicks
+  The first click constructs transient native Stable Cosserat warp/weft and
+  transition frames, quad shear/area state, VBD positions, sewing, Body-contact,
+  and self-contact state; later clicks
   reuse it while synchronizing supported Object Mode placement. The original
   Taichi implementation remains selectable as `Legacy Taichi PBD`. Each click
   advances a fixed short interval and scatters the result back to the original
@@ -126,7 +151,8 @@ treating Blender mesh identity as authoritative.
   absent from the production N-panel.
 - Each successful Kitsuke click mirrors the non-undoable runtime's exact seam
   pairs and targets, per-vertex velocities, revision, and transforms into
-  Blender data. Undo/Redo handlers discard the stale Taichi objects; the next click reconstructs them
+  Blender data. Undo/Redo handlers discard stale native/Taichi runtimes; the
+  next click reconstructs them
   from the state restored by Blender. A new Blender/add-on runtime ignores the
   old recovery epoch. Cross-restart continuation of a partially dressed state
   is unsupported; the supported workflow starts again from Load/Sewing.
@@ -140,7 +166,7 @@ treating Blender mesh identity as authoritative.
 - `UTIL/silhouette_export.py` is a standalone `bpy` preparation script for the
   Scripting workspace. It exports XZ and YZ orthographic silhouette SVGs and is
   normally run once per character; it is not registered as an add-on operator.
-- No Blender Cloth modifier is used. The active Taichi runtime is in memory;
+- No Blender Cloth modifier is used. The active native/Taichi runtime is in memory;
   Blender data contains only same-runtime Undo/Redo recovery state. Reopening
   and continuing a partially dressed session is unsupported.
 

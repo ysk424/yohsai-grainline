@@ -61,6 +61,15 @@ for sleeve in sleeves:
     assert "sewing_C" in mesh.attributes
     assert "sewing_RING" not in mesh.attributes
     assert "yohsai_pattern_edge_rest" in mesh.attributes
+    assert mesh_loader.GRAINLINE_EDGE_FAMILY_ATTRIBUTE in mesh.attributes
+    assert mesh_loader.GRAINLINE_FACE_QUAD_ATTRIBUTE in mesh.attributes
+    family = mesh.attributes[mesh_loader.GRAINLINE_EDGE_FAMILY_ATTRIBUTE]
+    quad = mesh.attributes[mesh_loader.GRAINLINE_FACE_QUAD_ATTRIBUTE]
+    quad_ids = {int(item.value) for item in quad.data if int(item.value) >= 0}
+    proxy_count = sum(
+        int(item.value) == mesh_loader.GRAINLINE_EDGE_PROXY for item in family.data
+    )
+    assert quad_ids and proxy_count == len(quad_ids)
     points = [sleeve.matrix_world @ vertex.co for vertex in mesh.vertices]
     assert max(point.y for point in points) - min(point.y for point in points) > 0.05
     assert max(point.z for point in points) - min(point.z for point in points) > 0.05

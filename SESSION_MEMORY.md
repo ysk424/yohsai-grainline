@@ -1,13 +1,14 @@
 # Yohsai session memory
 
-Status: historical v0.3 handoff; superseded for solver work by `COSSERAT_DESIGN.md`
+Status: historical v0.3/v0.4 handoff; superseded for current solver work by
+`GRAINLINE_DESIGN.md`
 Recorded: 2026-07-11 (Asia/Tokyo)
 Release prepared today: Yohsai 0.3.0
 
-Yohsai 0.4.1 uses 5 mm nominal cloth spacing and retains the native Stable
-Cosserat default backend introduced in 0.4.0. The product
+Yohsai 0.5.0 uses a 5 mm grain-aligned square material lattice and retains the
+native Stable Cosserat default backend introduced in 0.4.0. The product
 viewpoint below remains authoritative, but current solver state and validation
-must be read from `COSSERAT_DESIGN.md` and `README.md`.
+must be read from `GRAINLINE_DESIGN.md` and `README.md`.
 
 ## Product viewpoint that must not drift
 
@@ -45,7 +46,8 @@ production UI controls.
 7. After editing and saving the same pattern, use Update; use Sewing again only
    when the authored sewing signature changed.
 
-Current solver values are 8 substeps at 1/240 s, user-adjustable 1-128
+The legacy Taichi solver values recorded for this historical handoff are 8
+substeps at 1/240 s, user-adjustable 1-128
 constraint iterations/substep with default 16, Gravity 1.0 m/s², Seam Pull
 30 mm/click, ratcheting seam
 maximum-distance constraints, four post-contact seam projection passes, bend
@@ -158,4 +160,4 @@ longer than the combined front/back C path. Load creates left/right sleeve
 instances, wraps each into a welded cylinder, and Sewing pairs each closed C
 loop with one composite body C loop.
 
-The current expected archive is `dist/yohsai-0.4.1.zip`.
+The current expected archive is `dist/yohsai-0.5.0.zip`.

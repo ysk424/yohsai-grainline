@@ -1,15 +1,16 @@
-# Yohsai 0.4.1 — Stable Cosserat Kitsuke
+# Yohsai 0.5.0 — Grainline Cosserat Kitsuke
 
 Yohsai is a public, in-development Blender extension for clothing construction.
 The API, data shape, and generated output are still experimental.
 
-This repository is the `yohsai-grainline` research continuation of the
-validated Stable Cosserat implementation. Its next solver keeps the pattern
-paper's vertical direction as warp and replaces the internal triangular rod
-network with a grain-aligned square lattice while retaining a triangulated
-Blender and collision proxy. The fixed material convention and fork boundary
-are recorded in `GRAINLINE_DESIGN.md`. Until that milestone is implemented, the
-current code remains the tested v0.4.1 triangular baseline.
+This repository is the `yohsai-grainline` continuation of the validated Stable
+Cosserat implementation. Version 0.5.0 keeps the pattern paper's vertical
+direction as warp and replaces the internal three-direction triangular rod
+network with a grain-aligned square material lattice. Blender rendering and
+collision still use triangles, but each complete square's diagonal is only a
+proxy edge and never a structural Cosserat segment. The fixed material
+convention, equations, attributes, and acceptance record are in
+`GRAINLINE_DESIGN.md`.
 
 The Illustrator pattern is authoritative; Blender meshes are replaceable
 physical realizations of that pattern. The normal Yohsai workflow is
@@ -58,15 +59,17 @@ wheels. Blender expands `@W` fold panels and duplicates a panel containing
 `@M` as authored-left and mirrored-right parts. Two boundary edges marked
 `RING` are reserved construction edges: Load wraps the panel into a tube,
 welds those boundaries, and uses the internal `@TOP` position as the
-maximum-Z circumferential direction. It then creates an approximately 5 mm
-constrained triangular mesh and packs the separate objects into one numbered
-`CLOTHES_###` collection. Sewing labels and fold edges remain mesh attributes;
-`RING` does not become a sewing variable.
+maximum-Z circumferential direction. It then samples a 5 mm square grid in
+global pattern-page coordinates and triangulates it for Blender and collision.
+Page vertical is always warp and page horizontal is always weft; panel placement
+does not rotate the stored material frame. Arbitrary outlines retain a narrow
+triangular transition strip near the cut boundary. Sewing labels and fold edges
+remain mesh attributes; `RING` does not become a sewing variable.
 
-Version 0.4.1 halves the previous 10 mm nominal spacing. The fixed `test2.pdf`
-integration garment now contains 19,454 vertices and 38,030 triangles, versus
-4,821 vertices and 9,212 triangles in 0.4.0. This is 4.035 times as many
-vertices and provides the requested twofold linear mesh resolution.
+On the fixed `test2.pdf` fixture, v0.5.0 produces 16,948 vertices, 33,018 proxy
+triangles, 15,102 complete material quads, and 448 sewing constraints. The
+linear pitch remains the accepted 5 mm from v0.4.1; a square lattice has fewer
+samples per area than the former staggered triangular lattice at the same pitch.
 
 On a RING panel, a single-letter sewing marker extends over its complete
 boundary arc between the two RING edges. A closed sleeve `C` can therefore sew
@@ -101,11 +104,14 @@ continuing.
 
 After inspecting the `Sewing` preview, select a fixed mesh `Body` and press
 `Kitsuke`. The default backend constructs a transient native C++ Stable
-Cosserat rod graph. Every panel edge is a segment with its authoritative
-pattern length, each segment owns a unit material-frame quaternion, and
-near-collinear incident edges are paired for bending/twist. Triangle edges
-together preserve the sheet's in-plane metric; RING parts use their non-flat
-construction coordinates only to initialize directors.
+Cosserat material graph. Vertical lattice edges form warp chains, horizontal
+edges form weft chains, and irregular cut-boundary edges remain transition
+segments. Each structural segment owns a unit material-frame quaternion and
+near-collinear incident edges are paired for bending/twist. Every complete
+square adds explicit normalized shear and area constraints. Its triangulation
+diagonal is excluded from the rod graph. RING parts use their non-flat
+construction coordinates only to initialize directors while their flat pattern
+coordinates remain the material rest state.
 
 Each click advances eight 1/240-second substeps with alternating local VBD
 position sweeps and the Stable Cosserat closed-form orientation update. The
@@ -140,8 +146,9 @@ The Kitsuke `Iterations` box controls constraint iterations per substep; lower
 it on slow PCs and raise it on stronger CPUs when stretch is still visible.
 
 Kitsuke supports Blender Undo and Redo. Each successful click stores its exact
-seam vertex pairs and targets, per-vertex velocities, Stable Cosserat edge
-quaternions, revision, and Object Mode transforms in undoable Blender data.
+seam vertex pairs and targets, per-vertex velocities, structural Stable
+Cosserat edge quaternions, revision, and Object Mode transforms in undoable
+Blender data. Quad identity and edge families remain ordinary mesh attributes.
 After Undo or Redo, the non-undoable runtime is discarded and rebuilt from the
 restored Blender state before the next click.
 Opening the file in a new Blender/add-on runtime intentionally ignores that
@@ -151,7 +158,7 @@ restart is not supported; begin again from Load/Sewing when required.
 The native backend currently runs on the CPU through a versioned C ABI loaded
 with `ctypes`, so it is not tied to Blender's exact CPython patch version.
 The legacy backend asks Taichi for an available GPU and falls back to its CPU.
-Version 0.4.1 bundles the native Windows x64 DLL and the CPython 3.13 Windows
+Version 0.5.0 bundles the native Windows x64 DLL and the CPython 3.13 Windows
 x64 wheels.
 
 The input and JSON contracts are documented in `SVG_TO_JSON_SPEC.md`.
@@ -159,6 +166,9 @@ The complete Kitsuke workflow, solver invariants, tuning history, current
 parameters, and resume checklist are recorded in `KITSUKE_DESIGN.md`.
 The Stable Cosserat graph mapping, native boundary, contact scope, tests, and
 licensing decisions are recorded in `COSSERAT_DESIGN.md`.
+The v0.5 grain convention, square-lattice mapping, quad constraints, Blender
+attributes, native ABI v2, and measured acceptance record are in
+`GRAINLINE_DESIGN.md`.
 The pattern-designer viewpoint that governs Update, Sewing, Kitsuke, annotation
 design, and future automation is recorded in `DESIGN_PHILOSOPHY.md`.
 The current resume handoff and deliberately deferred issues are recorded in
@@ -178,6 +188,7 @@ The extension manifest is `blender_manifest.toml`. The source package contains:
 - `SVG_TO_JSON_SPEC.md`
 - `KITSUKE_DESIGN.md`
 - `COSSERAT_DESIGN.md`
+- `GRAINLINE_DESIGN.md`
 - `THIRD_PARTY_NOTICES.md`
 - `DESIGN_PHILOSOPHY.md`
 - `README.md`

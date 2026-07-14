@@ -104,17 +104,21 @@ ysc_status ysc_get_counts(
     int32_t* vertex_count,
     int32_t* segment_count,
     int32_t* angle_count,
+    int32_t* quad_count,
     int32_t* seam_count,
     char* error_message,
     int32_t error_capacity) {
     return guard(error_message, error_capacity, [&]() {
-        if (vertex_count == nullptr || segment_count == nullptr || angle_count == nullptr || seam_count == nullptr) {
+        if (
+            vertex_count == nullptr || segment_count == nullptr || angle_count == nullptr ||
+            quad_count == nullptr || seam_count == nullptr) {
             throw std::invalid_argument("count output pointer is null");
         }
         ysc::Solver& solver = require_solver(handle);
         *vertex_count = solver.vertex_count();
         *segment_count = solver.segment_count();
         *angle_count = solver.angle_count();
+        *quad_count = solver.quad_count();
         *seam_count = solver.seam_count();
     });
 }

@@ -71,7 +71,9 @@ try:
     click_two_start_orientations = session.runtime.orientation_state()
     click_two_start_seams = session.runtime.seam_state()
     click_two_start_edges = session.edges.copy()
+    click_two_start_all_edges = session.all_edges.copy()
     click_two_start_edge_rest = session.edge_rest.copy()
+    click_two_start_quads = session.quads.copy()
 
     assert bpy.ops.yohsai.kitsuke() == {"FINISHED"}
     session = kitsuke._sessions[collection.as_pointer()]
@@ -120,7 +122,9 @@ try:
     assert np.array_equal(reconstructed_orientations, click_two_start_orientations)
     assert np.array_equal(reconstructed_seams, click_two_start_seams)
     assert np.array_equal(reconstructed.edges, click_two_start_edges)
+    assert np.array_equal(reconstructed.all_edges, click_two_start_all_edges)
     assert np.array_equal(reconstructed.edge_rest, click_two_start_edge_rest)
+    assert np.array_equal(reconstructed.quads, click_two_start_quads)
     print(
         "YOHSAI_UNDO_START_DIFF",
         f"positions={np.max(np.abs(reconstructed_positions - click_two_start_positions)):.9g}",
@@ -128,6 +132,8 @@ try:
         f"orientations={np.max(np.abs(reconstructed_orientations - click_two_start_orientations)):.9g}",
         f"seams={np.max(np.abs(reconstructed_seams - click_two_start_seams)):.9g}",
         f"edges_equal={np.array_equal(reconstructed.edges, click_two_start_edges)}",
+        f"all_edges_equal={np.array_equal(reconstructed.all_edges, click_two_start_all_edges)}",
+        f"quads_equal={np.array_equal(reconstructed.quads, click_two_start_quads)}",
         f"edge_rest={np.max(np.abs(reconstructed.edge_rest - click_two_start_edge_rest)):.9g}",
     )
     kitsuke._sessions[collection.as_pointer()] = reconstructed

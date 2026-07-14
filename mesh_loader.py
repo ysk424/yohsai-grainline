@@ -20,6 +20,12 @@ PANEL_GAP_M = 0.10
 WORLD_Y_M = -1.0
 BOTTOM_Z_M = 0.01
 COLLECTION_PREFIX = "CLOTHES_"
+GRAINLINE_EDGE_FAMILY_ATTRIBUTE = "yohsai_grainline_family"
+GRAINLINE_FACE_QUAD_ATTRIBUTE = "yohsai_grainline_quad"
+GRAINLINE_EDGE_PROXY = 0
+GRAINLINE_EDGE_WARP = 1
+GRAINLINE_EDGE_WEFT = 2
+GRAINLINE_EDGE_TRANSITION = 3
 
 
 class MeshLoadError(ValueError):
@@ -54,6 +60,9 @@ class PanelGeometry:
     faces: list[tuple[int, ...]]
     edge_meta: dict[tuple[int, int], EdgeMeta]
     edge_rest: dict[tuple[int, int], float]
+    edge_family: dict[tuple[int, int], int]
+    quads: list[tuple[int, int, int, int]]
+    face_quads: dict[tuple[int, ...], int]
     ring_closed: bool
 
 
@@ -250,28 +259,149 @@ def _interior_grid(polygon: list[Vector], spacing: float) -> list[Vector]:
     max_x = max(point.x for point in polygon)
     min_y = min(point.y for point in polygon)
     max_y = max(point.y for point in polygon)
-    row_step = spacing * math.sqrt(3.0) / 2.0
     margin = spacing * 0.12
     result: list[Vector] = []
-    row = 0
-    y = min_y + row_step * 0.5
-    while y < max_y:
-        x = min_x + spacing * (0.5 if row % 2 == 0 else 1.0)
-        while x < max_x:
+    # Pattern-page coordinates are the material frame.  Sampling integer
+    # multiples of the pitch (rather than panel-local offsets) keeps every
+    # panel on the same authored warp/weft lattice: page Y is warp and page X
+    # is weft.
+    first_x = math.ceil(min_x / spacing)
+    last_x = math.floor(max_x / spacing)
+    first_y = math.ceil(min_y / spacing)
+    last_y = math.floor(max_y / spacing)
+    for grid_y in range(first_y, last_y + 1):
+        y = grid_y * spacing
+        for grid_x in range(first_x, last_x + 1):
+            x = grid_x * spacing
             point = Vector((x, y))
             if _point_in_polygon(point, polygon) and min(
                 _point_segment_distance(point, polygon[index], polygon[(index + 1) % len(polygon)])
                 for index in range(len(polygon))
             ) > margin:
                 result.append(point)
-            x += spacing
-        row += 1
-        y += row_step
     return result
 
 
 def _edge_key(a: int, b: int) -> tuple[int, int]:
     return (a, b) if a < b else (b, a)
+
+
+def _face_key(face: Iterable[int]) -> tuple[int, ...]:
+    return tuple(sorted(face))
+
+
+def _grid_coordinate(value: float, spacing: float) -> int | None:
+    coordinate = int(round(value / spacing))
+    # mathutils.Vector stores float32 components, so page coordinates near a
+    # metre need a sub-micron tolerance to round-trip a 5 mm lattice index.
+    if abs(value - coordinate * spacing) <= spacing * 1.0e-4:
+        return coordinate
+    return None
+
+
+def _grainline_topology(
+    pattern_vertices: list[Vector],
+    edges: list[tuple[int, int]],
+    faces: list[tuple[int, ...]],
+    spacing: float,
+) -> tuple[
+    dict[tuple[int, int], int],
+    list[tuple[int, int, int, int]],
+    dict[tuple[int, ...], int],
+]:
+    """Separate square material cells from the triangulated proxy surface."""
+    grid_vertices: dict[tuple[int, int], int] = {}
+    ambiguous_grid_vertices: set[tuple[int, int]] = set()
+    for vertex_index, point in enumerate(pattern_vertices):
+        grid_x = _grid_coordinate(point.x, spacing)
+        grid_y = _grid_coordinate(point.y, spacing)
+        if grid_x is None or grid_y is None:
+            continue
+        key = (grid_x, grid_y)
+        if key in ambiguous_grid_vertices:
+            continue
+        if key in grid_vertices:
+            # A RING seam may weld coincident pattern coordinates.  Such a
+            # boundary location is deliberately left in the transition strip.
+            grid_vertices.pop(key)
+            ambiguous_grid_vertices.add(key)
+            continue
+        grid_vertices[key] = vertex_index
+
+    edge_keys = {_edge_key(*edge) for edge in edges}
+    face_indices = {
+        _face_key(face): index
+        for index, face in enumerate(faces)
+        if len(face) == 3
+    }
+    quads: list[tuple[int, int, int, int]] = []
+    face_quads: dict[tuple[int, ...], int] = {}
+    proxy_diagonals: set[tuple[int, int]] = set()
+    for grid_x, grid_y in sorted(grid_vertices):
+        corner_keys = (
+            (grid_x, grid_y),
+            (grid_x + 1, grid_y),
+            (grid_x + 1, grid_y + 1),
+            (grid_x, grid_y + 1),
+        )
+        if not all(key in grid_vertices for key in corner_keys):
+            continue
+        bottom_left, bottom_right, top_right, top_left = (
+            grid_vertices[key] for key in corner_keys
+        )
+        sides = (
+            _edge_key(bottom_left, bottom_right),
+            _edge_key(bottom_right, top_right),
+            _edge_key(top_right, top_left),
+            _edge_key(top_left, bottom_left),
+        )
+        if not all(side in edge_keys for side in sides):
+            continue
+
+        first_diagonal = _edge_key(bottom_left, top_right)
+        second_diagonal = _edge_key(bottom_right, top_left)
+        if (first_diagonal in edge_keys) == (second_diagonal in edge_keys):
+            continue
+        if first_diagonal in edge_keys:
+            triangle_keys = (
+                _face_key((bottom_left, bottom_right, top_right)),
+                _face_key((bottom_left, top_right, top_left)),
+            )
+            diagonal = first_diagonal
+        else:
+            triangle_keys = (
+                _face_key((bottom_left, bottom_right, top_left)),
+                _face_key((bottom_right, top_right, top_left)),
+            )
+            diagonal = second_diagonal
+        if not all(key in face_indices for key in triangle_keys):
+            continue
+        if any(key in face_quads for key in triangle_keys):
+            raise MeshLoadError("A proxy triangle was assigned to more than one grainline quad.")
+
+        quad_index = len(quads)
+        quads.append((bottom_left, bottom_right, top_right, top_left))
+        for key in triangle_keys:
+            face_quads[key] = quad_index
+        proxy_diagonals.add(diagonal)
+
+    tolerance = spacing * 1.0e-4
+    edge_family: dict[tuple[int, int], int] = {}
+    for edge in edges:
+        key = _edge_key(*edge)
+        if key in proxy_diagonals:
+            family = GRAINLINE_EDGE_PROXY
+        else:
+            a, b = (pattern_vertices[index] for index in edge)
+            delta = b - a
+            if abs(delta.x) <= tolerance and abs(delta.y) > tolerance:
+                family = GRAINLINE_EDGE_WARP
+            elif abs(delta.y) <= tolerance and abs(delta.x) > tolerance:
+                family = GRAINLINE_EDGE_WEFT
+            else:
+                family = GRAINLINE_EDGE_TRANSITION
+        edge_family[key] = family
+    return edge_family, quads, face_quads
 
 
 def _find_vertex(points: list[Vector], target: Vector, tolerance: float = 1.0e-8) -> int:
@@ -463,7 +593,8 @@ def _triangulate_panel(
             input_edges.append((start, end))
             input_meta.append(EdgeMeta(None, True, False))
 
-    input_vertices.extend(_interior_grid(outline, spacing))
+    grid_points = _interior_grid(outline, spacing)
+    input_vertices.extend(grid_points)
     try:
         output = delaunay_2d_cdt(
             input_vertices,
@@ -476,7 +607,9 @@ def _triangulate_panel(
     except Exception as exc:
         raise MeshLoadError(f"Panel {panel_id!r} triangulation failed: {exc}") from exc
     vertices, edges, faces, _orig_vertices, original_edges, _original_faces = output
-    triangles = [tuple(face) for face in faces if len(face) >= 3]
+    if any(len(face) != 3 for face in faces):
+        raise MeshLoadError(f"Panel {panel_id!r} triangulation produced a non-triangular proxy face.")
+    triangles = [tuple(face) for face in faces]
     if not triangles:
         raise MeshLoadError(f"Panel {panel_id!r} triangulation produced no faces.")
 
@@ -534,11 +667,19 @@ def _triangulate_panel(
             for a, b in result_edges
         }
 
+    edge_family, quads, face_quads = _grainline_topology(
+        pattern_vertices,
+        result_edges,
+        result_faces,
+        spacing,
+    )
+
     mirrored = mirror_side == "RIGHT"
     if mirrored:
         center_x = (min(point.x for point in pattern_vertices) + max(point.x for point in pattern_vertices)) * 0.5
         pattern_vertices = [Vector((2.0 * center_x - point.x, point.y)) for point in pattern_vertices]
         construction_vertices = [Vector((-point.x, point.y, point.z)) for point in construction_vertices]
+        quads = [(bottom_right, bottom_left, top_left, top_right) for bottom_left, bottom_right, top_right, top_left in quads]
         result_faces = [tuple(reversed(face)) for face in result_faces]
 
     base_instance = str(update_label or panel_id)
@@ -555,6 +696,9 @@ def _triangulate_panel(
         faces=result_faces,
         edge_meta=edge_meta,
         edge_rest=edge_rest,
+        edge_family=edge_family,
+        quads=quads,
+        face_quads=face_quads,
         ring_closed=ring_closed,
     )
 
@@ -629,9 +773,24 @@ def _write_panel_mesh_attributes(
             raise MeshLoadError("A pattern rest edge was lost while creating the Blender mesh.")
         rest_attribute.data[edge_index].value = value
 
+    family_attribute = mesh.attributes.new(
+        name=GRAINLINE_EDGE_FAMILY_ATTRIBUTE, type="INT", domain="EDGE"
+    )
+    for edge in mesh.edges:
+        key = _edge_key(*edge.vertices)
+        family_attribute.data[edge.index].value = panel.edge_family.get(
+            key, GRAINLINE_EDGE_TRANSITION
+        )
+
     panel_attribute = mesh.attributes.new(name="panel_index", type="INT", domain="FACE")
+    quad_attribute = mesh.attributes.new(
+        name=GRAINLINE_FACE_QUAD_ATTRIBUTE, type="INT", domain="FACE"
+    )
     for polygon in mesh.polygons:
         panel_attribute.data[polygon.index].value = panel_index
+        quad_attribute.data[polygon.index].value = panel.face_quads.get(
+            _face_key(polygon.vertices), -1
+        )
 
     pattern_attribute = mesh.attributes.new(name="yohsai_pattern_position", type="FLOAT_VECTOR", domain="POINT")
     for item, point in zip(pattern_attribute.data, panel.pattern_vertices):

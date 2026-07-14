@@ -1,6 +1,7 @@
 # Stable Cosserat Kitsuke Design
 
-Status: v0.4 native CPU milestone implemented and integration-tested
+Status: historical v0.4 triangular baseline; superseded in this repository by
+the v0.5 grainline mapping in `GRAINLINE_DESIGN.md`
 Recorded: 2026-07-14 (Asia/Tokyo)
 
 ## 1. Scope
@@ -9,6 +10,12 @@ This repository preserves Yohsai's pattern-authoritative workflow and replaces
 only the transient Kitsuke physics backend. `Load`, `Update`, `Sewing`, manual
 Object Mode placement, Lock, Undo/Redo, and the separate persistent panel
 objects remain product invariants.
+
+This document records the validated `yohsai-cosserat` v0.4 baseline. Version
+0.5.0 retains its Stable Cosserat position/orientation solve and contact rules,
+but replaces the graph construction described below with warp/weft structural
+edges, proxy diagonals, and explicit quad shear/area response. Read
+`GRAINLINE_DESIGN.md` for current behavior.
 
 Stable Cosserat Rods is a one-dimensional rod method, not a triangular shell
 method. The first implementation therefore uses a hybrid graph construction
@@ -23,9 +30,9 @@ instead of claiming a direct shell formulation:
 - Body contact uses capped continuation and self-contact uses interior
   point-triangle normal projection; both retain Yohsai's Python broad phase.
 
-This produces a three-direction rod network on the current near-equilateral
-triangulation. A later material-aware remesher may replace it with explicit
-warp/weft families without changing the native API.
+This produced the three-direction rod network on the v0.4 near-equilateral
+triangulation. The v0.5 fork implemented the planned warp/weft remeshing and
+bumped the native API to version 2.
 
 ## 2. Numerical state
 

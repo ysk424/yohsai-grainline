@@ -32,6 +32,7 @@ struct NativeSolver {
     int32_t vertex_count = 0;
     int32_t segment_count = 0;
     int32_t angle_count = 0;
+    int32_t quad_count = 0;
     int32_t seam_count = 0;
 
     NativeSolver(const ysc_create_desc& desc, const ysc_config& config) {
@@ -43,6 +44,7 @@ struct NativeSolver {
             &vertex_count,
             &segment_count,
             &angle_count,
+            &quad_count,
             &seam_count,
             error.data(),
             static_cast<int32_t>(error.size()));
@@ -124,15 +126,19 @@ ysc_create_desc chain_desc(
     const std::vector<int32_t>& edges,
     const std::vector<float>& edge_rest,
     const std::vector<int32_t>& locked,
-    const std::vector<int32_t>& seams = {}) {
+    const std::vector<int32_t>& seams = {},
+    const std::vector<int32_t>& quads = {}) {
     ysc_create_desc desc{};
     desc.vertex_count = static_cast<int32_t>(positions.size() / 3);
     desc.positions = positions.data();
     desc.rest_frame_positions = rest.data();
+    desc.material_rest_positions = rest.data();
     desc.locked = locked.empty() ? nullptr : locked.data();
     desc.edge_count = static_cast<int32_t>(edges.size() / 2);
     desc.edges = edges.data();
     desc.edge_rest_lengths = edge_rest.data();
+    desc.quad_count = static_cast<int32_t>(quads.size() / 4);
+    desc.quads = quads.empty() ? nullptr : quads.data();
     desc.seam_count = static_cast<int32_t>(seams.size() / 2);
     desc.seams = seams.empty() ? nullptr : seams.data();
     return desc;
@@ -278,6 +284,98 @@ void test_coplanar_nearby_triangle_does_not_repel() {
     require(stats.maximum_displacement < 1.0e-5F, "coplanar nearby triangle caused false self-contact");
 }
 
+void test_grain_quad_rest_and_rigid_transform() {
+    const std::vector<float> material{
+        0.0F, 0.0F, 0.0F,
+        1.0F, 0.0F, 0.0F,
+        1.0F, 0.0F, 1.0F,
+        0.0F, 0.0F, 1.0F,
+    };
+    const std::vector<int32_t> edges{0, 1, 1, 2, 2, 3, 3, 0};
+    const std::vector<float> edge_rest{1.0F, 1.0F, 1.0F, 1.0F};
+    const std::vector<int32_t> locked{0, 0, 0, 0};
+    const std::vector<int32_t> quads{0, 1, 2, 3};
+
+    const ysc_create_desc rest_desc = chain_desc(material, material, edges, edge_rest, locked, {}, quads);
+    NativeSolver rest_solver(rest_desc, test_config());
+    require(rest_solver.quad_count == 1, "grain quad count is wrong");
+    const ysc_stats rest_stats = rest_solver.advance({0.0F, 0.0F, 0.0F}, 0.0F);
+    require(rest_stats.quad_count == 1, "grain quad stats count is wrong");
+    require(rest_stats.maximum_displacement < 1.0e-5F, "rest grain quad drifted");
+    require(rest_stats.shear_energy < 1.0e-6F, "rest grain quad has shear energy");
+    require(rest_stats.area_energy < 1.0e-6F, "rest grain quad has area energy");
+
+    const std::vector<float> transformed{
+        3.0F, -2.0F, 4.0F,
+        3.0F, -1.0F, 4.0F,
+        4.0F, -1.0F, 4.0F,
+        4.0F, -2.0F, 4.0F,
+    };
+    ysc_create_desc transformed_desc = chain_desc(
+        transformed, material, edges, edge_rest, locked, {}, quads);
+    transformed_desc.material_rest_positions = material.data();
+    NativeSolver transformed_solver(transformed_desc, test_config());
+    const ysc_stats transformed_stats = transformed_solver.advance({0.0F, 0.0F, 0.0F}, 0.0F);
+    require(transformed_stats.maximum_displacement < 2.0e-5F, "rigidly transformed grain quad drifted");
+}
+
+void test_grain_quad_shear_and_area_response() {
+    const std::vector<float> material{
+        0.0F, 0.0F, 0.0F,
+        1.0F, 0.0F, 0.0F,
+        1.0F, 0.0F, 1.0F,
+        0.0F, 0.0F, 1.0F,
+    };
+    const std::vector<int32_t> edges{0, 1, 1, 2, 2, 3, 3, 0};
+    const std::vector<int32_t> locked{1, 1, 0, 0};
+    const std::vector<int32_t> quads{0, 1, 2, 3};
+
+    const std::vector<float> sheared{
+        0.0F, 0.0F, 0.0F,
+        1.0F, 0.0F, 0.0F,
+        1.4F, 0.0F, 1.0F,
+        0.4F, 0.0F, 1.0F,
+    };
+    const float side = std::sqrt(1.16F);
+    const std::vector<float> sheared_edge_rest{1.0F, side, 1.0F, side};
+    ysc_create_desc shear_desc = chain_desc(
+        sheared, sheared, edges, sheared_edge_rest, locked, {}, quads);
+    shear_desc.material_rest_positions = material.data();
+    ysc_config shear_config = test_config();
+    shear_config.iterations = 16;
+    shear_config.stretch_stiffness = 1.0e-3F;
+    shear_config.quad_area_stiffness = 0.0F;
+    NativeSolver shear_solver(shear_desc, shear_config);
+    const ysc_stats shear_stats = shear_solver.advance({0.0F, 0.0F, 0.0F}, 0.0F);
+    const std::vector<float> shear_result = shear_solver.positions();
+    require(
+        0.5F * (shear_result[6] + shear_result[9]) < 0.85F,
+        "grain quad shear did not restore the free edge");
+    require(std::isfinite(shear_stats.shear_energy), "grain quad shear energy is non-finite");
+
+    const std::vector<float> compressed{
+        0.0F, 0.0F, 0.0F,
+        1.0F, 0.0F, 0.0F,
+        1.0F, 0.0F, 0.5F,
+        0.0F, 0.0F, 0.5F,
+    };
+    const std::vector<float> compressed_edge_rest{1.0F, 0.5F, 1.0F, 0.5F};
+    ysc_create_desc area_desc = chain_desc(
+        compressed, compressed, edges, compressed_edge_rest, locked, {}, quads);
+    area_desc.material_rest_positions = material.data();
+    ysc_config area_config = test_config();
+    area_config.iterations = 16;
+    area_config.stretch_stiffness = 1.0e-3F;
+    area_config.quad_shear_stiffness = 0.0F;
+    NativeSolver area_solver(area_desc, area_config);
+    const ysc_stats area_stats = area_solver.advance({0.0F, 0.0F, 0.0F}, 0.0F);
+    const std::vector<float> area_result = area_solver.positions();
+    require(
+        0.5F * (area_result[8] + area_result[11]) > 0.55F,
+        "grain quad area did not restore the compressed free edge");
+    require(std::isfinite(area_stats.area_energy), "grain quad area energy is non-finite");
+}
+
 void test_gravity_is_finite_and_bounded() {
     const std::vector<float> positions{
         0.0F, 0.0F, 0.0F,
@@ -314,6 +412,8 @@ int main() {
         test_progressive_seam_and_lock();
         test_deep_body_contact_is_incremental();
         test_coplanar_nearby_triangle_does_not_repel();
+        test_grain_quad_rest_and_rigid_transform();
+        test_grain_quad_shear_and_area_response();
         test_gravity_is_finite_and_bounded();
         std::cout << "All Stable Cosserat native tests passed.\n";
         return EXIT_SUCCESS;

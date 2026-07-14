@@ -90,6 +90,8 @@ ysc_config default_config() {
     config.iterations = 16;
     config.stretch_stiffness = 2.0e6F;
     config.bend_stiffness = 2.0e-4F;
+    config.quad_shear_stiffness = 2.0e5F;
+    config.quad_area_stiffness = 2.0e5F;
     config.straight_pair_cosine = -0.65F;
     config.seam_projection_passes = 4;
     config.velocity_damping_per_second = 4.0F;
@@ -101,7 +103,9 @@ ysc_config default_config() {
 
 Solver::Solver(const ysc_create_desc& desc, const ysc_config& config) : config_(config) {
     validate_config();
-    if (desc.vertex_count <= 0 || desc.positions == nullptr || desc.rest_frame_positions == nullptr) {
+    if (
+        desc.vertex_count <= 0 || desc.positions == nullptr || desc.rest_frame_positions == nullptr ||
+        desc.material_rest_positions == nullptr) {
         throw std::invalid_argument("create descriptor has no vertex data");
     }
     if (desc.edge_count <= 0 || desc.edges == nullptr || desc.edge_rest_lengths == nullptr) {
@@ -109,6 +113,9 @@ Solver::Solver(const ysc_create_desc& desc, const ysc_config& config) : config_(
     }
     if (desc.seam_count < 0 || (desc.seam_count > 0 && desc.seams == nullptr)) {
         throw std::invalid_argument("create descriptor has invalid seam data");
+    }
+    if (desc.quad_count < 0 || (desc.quad_count > 0 && desc.quads == nullptr)) {
+        throw std::invalid_argument("create descriptor has invalid quad data");
     }
     if (desc.face_count < 0 || (desc.face_count > 0 && desc.faces == nullptr)) {
         throw std::invalid_argument("create descriptor has invalid face data");
@@ -122,6 +129,7 @@ Solver::Solver(const ysc_create_desc& desc, const ysc_config& config) : config_(
 
     vertices_.resize(static_cast<size_t>(desc.vertex_count));
     rest_positions_.resize(static_cast<size_t>(desc.vertex_count));
+    material_rest_positions_.resize(static_cast<size_t>(desc.vertex_count));
     for (int32_t index = 0; index < desc.vertex_count; ++index) {
         Vertex& vertex = vertices_[static_cast<size_t>(index)];
         vertex.position = read_vec3(desc.positions, index);
@@ -136,8 +144,10 @@ Solver::Solver(const ysc_create_desc& desc, const ysc_config& config) : config_(
             vertex.velocity = {};
         }
         rest_positions_[static_cast<size_t>(index)] = read_vec3(desc.rest_frame_positions, index);
+        material_rest_positions_[static_cast<size_t>(index)] = read_vec3(desc.material_rest_positions, index);
         if (
             !finite(vertex.position) || !finite(vertex.velocity) || !finite(rest_positions_[static_cast<size_t>(index)]) ||
+            !finite(material_rest_positions_[static_cast<size_t>(index)]) ||
             !std::isfinite(vertex.unlocked_inverse_mass) || vertex.unlocked_inverse_mass < 0.0F) {
             throw std::invalid_argument("create descriptor contains non-finite or negative vertex data");
         }
@@ -181,6 +191,7 @@ Solver::Solver(const ysc_create_desc& desc, const ysc_config& config) : config_(
     }
 
     build_segments(desc);
+    build_quads(desc);
     initialize_orientations_from_geometry();
     build_angles();
 
@@ -210,6 +221,10 @@ int32_t Solver::angle_count() const noexcept {
     return static_cast<int32_t>(angles_.size());
 }
 
+int32_t Solver::quad_count() const noexcept {
+    return static_cast<int32_t>(quads_.size());
+}
+
 int32_t Solver::seam_count() const noexcept {
     return static_cast<int32_t>(seams_.size());
 }
@@ -218,6 +233,8 @@ void Solver::validate_config() const {
     if (
         !(config_.time_step > 0.0F) || config_.substeps <= 0 || config_.iterations <= 0 ||
         !(config_.stretch_stiffness > 0.0F) || config_.bend_stiffness < 0.0F ||
+        config_.quad_shear_stiffness < 0.0F || config_.quad_area_stiffness < 0.0F ||
+        !std::isfinite(config_.quad_shear_stiffness) || !std::isfinite(config_.quad_area_stiffness) ||
         config_.straight_pair_cosine < -1.0F || config_.straight_pair_cosine > 1.0F ||
         config_.seam_projection_passes < 0 || config_.velocity_damping_per_second < 0.0F ||
         !(config_.maximum_speed > 0.0F) || !(config_.maximum_position_correction > 0.0F) ||
@@ -246,6 +263,51 @@ void Solver::build_segments(const ysc_create_desc& desc) {
         segments_.push_back(segment);
         vertex_segments_[static_cast<size_t>(a)].push_back(index);
         vertex_segments_[static_cast<size_t>(b)].push_back(index);
+    }
+}
+
+void Solver::build_quads(const ysc_create_desc& desc) {
+    quads_.reserve(static_cast<size_t>(desc.quad_count));
+    vertex_quads_.resize(vertices_.size());
+    for (int32_t index = 0; index < desc.quad_count; ++index) {
+        Quad quad;
+        for (int32_t corner = 0; corner < 4; ++corner) {
+            quad.vertices[static_cast<size_t>(corner)] = desc.quads[index * 4 + corner];
+            validate_index(
+                quad.vertices[static_cast<size_t>(corner)], desc.vertex_count, "quad vertex");
+        }
+        std::set<int32_t> unique(quad.vertices.begin(), quad.vertices.end());
+        if (unique.size() != 4) {
+            throw std::invalid_argument("quad vertices must be distinct");
+        }
+
+        const Vec3& p0 = material_rest_positions_[static_cast<size_t>(quad.vertices[0])];
+        const Vec3& p1 = material_rest_positions_[static_cast<size_t>(quad.vertices[1])];
+        const Vec3& p2 = material_rest_positions_[static_cast<size_t>(quad.vertices[2])];
+        const Vec3& p3 = material_rest_positions_[static_cast<size_t>(quad.vertices[3])];
+        const Vec3 u = 0.5F * ((p1 - p0) + (p2 - p3));
+        const Vec3 v = 0.5F * ((p3 - p0) + (p2 - p1));
+        const Vec3 normal = cross(u, v);
+        quad.rest_product = length(u) * length(v);
+        quad.rest_area = length(normal);
+        if (
+            !(quad.rest_product > kEpsilon) || !(quad.rest_area > kEpsilon) ||
+            !std::isfinite(quad.rest_product) || !std::isfinite(quad.rest_area)) {
+            throw std::invalid_argument("quad has a degenerate material rest shape");
+        }
+        quad.rest_shear = dot(u, v) / quad.rest_product;
+        quad.rest_normal = normal / quad.rest_area;
+        quad.shear_stiffness = config_.quad_shear_stiffness * quad.rest_area;
+        quad.area_stiffness = config_.quad_area_stiffness * quad.rest_area;
+        if (!std::isfinite(quad.rest_shear) || !finite(quad.rest_normal)) {
+            throw std::invalid_argument("quad has invalid material rest data");
+        }
+
+        const int32_t quad_index = static_cast<int32_t>(quads_.size());
+        quads_.push_back(quad);
+        for (const int32_t vertex : quad.vertices) {
+            vertex_quads_[static_cast<size_t>(vertex)].push_back(quad_index);
+        }
     }
 }
 
@@ -449,6 +511,8 @@ void Solver::predict(const Vec3& gravity) {
 }
 
 void Solver::position_sweep(float time_step) {
+    static constexpr std::array<float, 4> kWeftCoefficient{-0.5F, 0.5F, 0.5F, -0.5F};
+    static constexpr std::array<float, 4> kWarpCoefficient{-0.5F, -0.5F, 0.5F, 0.5F};
     const float inverse_h_squared = 1.0F / (time_step * time_step);
     for (int32_t vertex_index = 0; vertex_index < vertex_count(); ++vertex_index) {
         Vertex& vertex = vertices_[static_cast<size_t>(vertex_index)];
@@ -467,6 +531,44 @@ void Solver::position_sweep(float time_step) {
             const float gradient_scale = segment.stretch_stiffness / segment.rest_length;
             gradient += (vertex_index == segment.a ? -gradient_scale : gradient_scale) * constraint;
             hessian += segment.stretch_stiffness / (segment.rest_length * segment.rest_length);
+        }
+        for (const int32_t quad_index : vertex_quads_[static_cast<size_t>(vertex_index)]) {
+            const Quad& quad = quads_[static_cast<size_t>(quad_index)];
+            const auto corner_iterator = std::find(
+                quad.vertices.begin(), quad.vertices.end(), vertex_index);
+            if (corner_iterator == quad.vertices.end()) {
+                throw std::runtime_error("quad adjacency is inconsistent");
+            }
+            const size_t corner = static_cast<size_t>(corner_iterator - quad.vertices.begin());
+            const Vec3& p0 = vertices_[static_cast<size_t>(quad.vertices[0])].position;
+            const Vec3& p1 = vertices_[static_cast<size_t>(quad.vertices[1])].position;
+            const Vec3& p2 = vertices_[static_cast<size_t>(quad.vertices[2])].position;
+            const Vec3& p3 = vertices_[static_cast<size_t>(quad.vertices[3])].position;
+            const Vec3 weft = 0.5F * ((p1 - p0) + (p2 - p3));
+            const Vec3 warp = 0.5F * ((p3 - p0) + (p2 - p1));
+            const float weft_coefficient = kWeftCoefficient[corner];
+            const float warp_coefficient = kWarpCoefficient[corner];
+
+            if (quad.shear_stiffness > 0.0F) {
+                const float constraint = dot(weft, warp) / quad.rest_product - quad.rest_shear;
+                const Vec3 constraint_gradient =
+                    (weft_coefficient * warp + warp_coefficient * weft) / quad.rest_product;
+                gradient += (quad.shear_stiffness * constraint) * constraint_gradient;
+                hessian += quad.shear_stiffness * length_squared(constraint_gradient);
+            }
+
+            if (quad.area_stiffness > 0.0F) {
+                const Vec3 area_vector = cross(weft, warp);
+                const float current_area = length(area_vector);
+                const Vec3 normal = normalized(area_vector, quad.rest_normal);
+                const float constraint = current_area / quad.rest_area - 1.0F;
+                const Vec3 weft_gradient = cross(warp, normal) / quad.rest_area;
+                const Vec3 warp_gradient = cross(normal, weft) / quad.rest_area;
+                const Vec3 constraint_gradient =
+                    weft_coefficient * weft_gradient + warp_coefficient * warp_gradient;
+                gradient += (quad.area_stiffness * constraint) * constraint_gradient;
+                hessian += quad.area_stiffness * length_squared(constraint_gradient);
+            }
         }
         if (!(hessian > kEpsilon) || !std::isfinite(hessian)) {
             throw std::runtime_error("local VBD Hessian is invalid");
@@ -719,9 +821,11 @@ float Solver::maximum_edge_strain() const {
     return result;
 }
 
-void Solver::compute_energy(float& stretch, float& bend) const {
+void Solver::compute_energy(float& stretch, float& bend, float& shear, float& area) const {
     stretch = 0.0F;
     bend = 0.0F;
+    shear = 0.0F;
+    area = 0.0F;
     for (const Segment& segment : segments_) {
         const Vec3 difference =
             vertices_[static_cast<size_t>(segment.b)].position - vertices_[static_cast<size_t>(segment.a)].position;
@@ -735,6 +839,18 @@ void Solver::compute_energy(float& stretch, float& bend) const {
             segments_[static_cast<size_t>(angle.b)].orientation);
         const float phi = dot(relative, angle.rest_relative) >= 0.0F ? 1.0F : -1.0F;
         bend += 0.5F * angle.bend_stiffness * quaternion_distance_squared(relative, phi * angle.rest_relative);
+    }
+    for (const Quad& quad : quads_) {
+        const Vec3& p0 = vertices_[static_cast<size_t>(quad.vertices[0])].position;
+        const Vec3& p1 = vertices_[static_cast<size_t>(quad.vertices[1])].position;
+        const Vec3& p2 = vertices_[static_cast<size_t>(quad.vertices[2])].position;
+        const Vec3& p3 = vertices_[static_cast<size_t>(quad.vertices[3])].position;
+        const Vec3 weft = 0.5F * ((p1 - p0) + (p2 - p3));
+        const Vec3 warp = 0.5F * ((p3 - p0) + (p2 - p1));
+        const float shear_constraint = dot(weft, warp) / quad.rest_product - quad.rest_shear;
+        const float area_constraint = length(cross(weft, warp)) / quad.rest_area - 1.0F;
+        shear += 0.5F * quad.shear_stiffness * shear_constraint * shear_constraint;
+        area += 0.5F * quad.area_stiffness * area_constraint * area_constraint;
     }
 }
 
@@ -814,6 +930,7 @@ ysc_stats Solver::advance(const ysc_advance_desc& desc) {
     stats.iterations = iterations;
     stats.segment_count = segment_count();
     stats.angle_count = angle_count();
+    stats.quad_count = quad_count();
     stats.body_candidate_count = desc.body_candidate_count;
     stats.self_candidate_count = desc.self_candidate_count;
     for (size_t index = 0; index < vertices_.size(); ++index) {
@@ -822,7 +939,7 @@ ysc_stats Solver::advance(const ysc_advance_desc& desc) {
             length(vertices_[index].position - click_start[index]));
     }
     stats.maximum_edge_strain = maximum_edge_strain();
-    compute_energy(stats.stretch_energy, stats.bend_energy);
+    compute_energy(stats.stretch_energy, stats.bend_energy, stats.shear_energy, stats.area_energy);
     return stats;
 }
 

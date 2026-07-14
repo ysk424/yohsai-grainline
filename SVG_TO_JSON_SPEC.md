@@ -269,18 +269,22 @@ welded. The result is one connected annular mesh rather than two boundaries
 held together by sewing springs. The flat pattern edge lengths remain the
 stretch rest lengths; the constructed cylinder is the bend rest shape.
 
-### 10.3 Triangulation
+### 10.3 Grain-aligned material mesh and triangulated proxy
 
 Bezier and line boundaries are sampled at no more than approximately `0.005 m`
-between boundary vertices. The interior is filled with a near-uniform
-constrained triangular mesh at the same nominal spacing. Triangles form the
-panel topology consumed by the selected Kitsuke solver. `Load` does not create
-loose sewing-preview edges, perform Sewing, or add a Blender Cloth modifier.
-Version 0.4.1 halves the 0.4.0 nominal spacing of `0.01 m`, giving approximately
-twice the linear resolution and four times the vertices on comparable panels.
+between boundary vertices. Version 0.5.0 fills the interior from a global 5 mm
+square grid in pattern-page coordinates: page vertical is warp and page
+horizontal is weft. Complete square cells supply the Stable Cosserat material
+lattice. Their two Blender/collision faces retain one proxy diagonal that is
+excluded from the rod graph. Arbitrary panel cuts leave a narrow constrained
+triangular transition near the boundary. `Load` does not create loose
+sewing-preview edges, perform Sewing, or add a Blender Cloth modifier.
 
 Boundary edge attributes preserve sewing membership as Boolean mesh attributes
 named `sewing_<LABEL>`. Fold edges use the Boolean mesh attribute `fold`.
+`yohsai_grainline_family` records proxy/warp/weft/transition edges and paired
+proxy faces share a `yohsai_grainline_quad` integer. The full mapping is in
+`GRAINLINE_DESIGN.md`.
 
 ### 10.4 Object and collection
 
