@@ -965,8 +965,19 @@ class _KitsukeSession:
             for vertex, world_position in zip(obj.data.vertices, selection):
                 vertex.co = inverse @ Vector(tuple(float(value) for value in world_position))
             obj.data.update()
+            self.positions[part.start : part.start + part.count] = _world_vertices(obj)
             obj.hide_set(False)
             obj.hide_render = False
+        if self.backend == KITSUKE_BACKEND_STABLE_COSSERAT:
+            # Blender mesh coordinates are the undoable authority. Keep the
+            # live native state on their exact float32 round trip so the next
+            # click and an Undo-reconstructed repeat start bit-for-bit alike.
+            self.runtime.replace_state(
+                self.positions,
+                self.velocities,
+                self.locked,
+                reinitialize_orientations=False,
+            )
         if self.preview is not None:
             mesh = self.preview.data
             bpy.data.objects.remove(self.preview, do_unlink=True)
@@ -986,7 +997,12 @@ class _KitsukeSession:
             _write_velocity_state(part, selection)
             part.obj[_STATE_MATRIX_KEY] = list(_matrix_tuple(part.obj.matrix_world))
         if self.backend == KITSUKE_BACKEND_STABLE_COSSERAT:
-            _write_orientation_state(self.parts, self.runtime.orientation_state())
+            orientations = self.runtime.orientation_state()
+            _write_orientation_state(self.parts, orientations)
+            # Reconstruction normalizes the persisted float32 quaternions.
+            # Apply the identical operation to the live runtime so ordinary
+            # continuation and an Undo-replayed click have the same state.
+            self.runtime.replace_orientation_state(orientations)
         self.revision += 1
         self.collection[_STATE_SEAMS_KEY] = [int(value) for value in self.seams.ravel()]
         self.collection[_STATE_SEAM_REST_KEY] = [float(value) for value in self.runtime.seam_state()]

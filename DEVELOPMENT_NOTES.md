@@ -2,7 +2,7 @@
 
 Status: public development preview.
 
-Current version: 0.4.0.
+Current version: 0.4.1.
 
 The authoritative Kitsuke design, tuning log, known limitations, and resume
 checklist are maintained in `KITSUKE_DESIGN.md`.
@@ -22,6 +22,21 @@ project's XPBD and finite-element prototypes. This is qualitative owner
 feedback; it does not replace measured benchmarks or automated regression
 tests. The owner also reported lower-than-expected implementation time and
 model-token use.
+
+## 0.4.1 Mesh Density
+
+Version 0.4.1 halves the nominal cloth spacing from 10 mm to 5 mm. On the fixed
+`test2.pdf` integration input, the two panels now contain 19,454 vertices and
+38,030 triangles, with 448 sewing constraints. The previous 0.4.0 mesh had
+4,821 vertices, so the new vertex count is 4.035 times larger.
+
+The source integration test completed ten Stable Cosserat Kitsuke operations
+without rollback on 2026-07-14. The complete Load, Sewing, Kitsuke, and Update
+test took 388.210 seconds on the development machine. A density-only Load and
+Sewing check took 4.714 seconds. These timings are regression observations for
+this machine, not cross-machine performance guarantees. High-density testing
+also exposed and fixed a quaternion-normalization mismatch between live
+continuation and Undo reconstruction; replay now has zero state and seam delta.
 
 The first real-character 0.1.9 trial produces a recognizable fitted dress from
 the incremental workflow. Remaining visible holes at the shoulder, chest, and

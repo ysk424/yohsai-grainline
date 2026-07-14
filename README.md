@@ -1,4 +1,4 @@
-# Yohsai 0.4.0 — Stable Cosserat Kitsuke
+# Yohsai 0.4.1 — Stable Cosserat Kitsuke
 
 Yohsai is a public, in-development Blender extension for clothing construction.
 The API, data shape, and generated output are still experimental.
@@ -50,10 +50,15 @@ wheels. Blender expands `@W` fold panels and duplicates a panel containing
 `@M` as authored-left and mirrored-right parts. Two boundary edges marked
 `RING` are reserved construction edges: Load wraps the panel into a tube,
 welds those boundaries, and uses the internal `@TOP` position as the
-maximum-Z circumferential direction. It then creates an approximately 1 cm
+maximum-Z circumferential direction. It then creates an approximately 5 mm
 constrained triangular mesh and packs the separate objects into one numbered
 `CLOTHES_###` collection. Sewing labels and fold edges remain mesh attributes;
 `RING` does not become a sewing variable.
+
+Version 0.4.1 halves the previous 10 mm nominal spacing. The fixed `test2.pdf`
+integration garment now contains 19,454 vertices and 38,030 triangles, versus
+4,821 vertices and 9,212 triangles in 0.4.0. This is 4.035 times as many
+vertices and provides the requested twofold linear mesh resolution.
 
 On a RING panel, a single-letter sewing marker extends over its complete
 boundary arc between the two RING edges. A closed sleeve `C` can therefore sew
@@ -138,7 +143,7 @@ restart is not supported; begin again from Load/Sewing when required.
 The native backend currently runs on the CPU through a versioned C ABI loaded
 with `ctypes`, so it is not tied to Blender's exact CPython patch version.
 The legacy backend asks Taichi for an available GPU and falls back to its CPU.
-Version 0.4.0 bundles the native Windows x64 DLL and the CPython 3.13 Windows
+Version 0.4.1 bundles the native Windows x64 DLL and the CPython 3.13 Windows
 x64 wheels.
 
 The input and JSON contracts are documented in `SVG_TO_JSON_SPEC.md`.

@@ -67,6 +67,12 @@ try:
     revision_one = session.revision
     bpy.ops.ed.undo_push(message="Yohsai Undo test click 1")
 
+    click_two_start_positions, click_two_start_velocities = session.runtime.state()
+    click_two_start_orientations = session.runtime.orientation_state()
+    click_two_start_seams = session.runtime.seam_state()
+    click_two_start_edges = session.edges.copy()
+    click_two_start_edge_rest = session.edge_rest.copy()
+
     assert bpy.ops.yohsai.kitsuke() == {"FINISHED"}
     session = kitsuke._sessions[collection.as_pointer()]
     seam_two = session.runtime.seam_state().copy()
@@ -98,6 +104,33 @@ try:
     # stale in-memory click-2 target that originally exposed the bug.
     assert bpy.ops.ed.undo() == {"FINISHED"}
     assert not kitsuke._sessions
+    collection = bpy.data.collections[collection_name]
+    reconstructed = kitsuke._KitsukeSession(
+        bpy.context,
+        collection,
+        bpy.context.scene.yohsai.body_object,
+        kitsuke._sewn_preview(collection),
+        kitsuke.KITSUKE_BACKEND_STABLE_COSSERAT,
+    )
+    reconstructed_positions, reconstructed_velocities = reconstructed.runtime.state()
+    reconstructed_orientations = reconstructed.runtime.orientation_state()
+    reconstructed_seams = reconstructed.runtime.seam_state()
+    assert np.array_equal(reconstructed_positions, click_two_start_positions)
+    assert np.array_equal(reconstructed_velocities, click_two_start_velocities)
+    assert np.array_equal(reconstructed_orientations, click_two_start_orientations)
+    assert np.array_equal(reconstructed_seams, click_two_start_seams)
+    assert np.array_equal(reconstructed.edges, click_two_start_edges)
+    assert np.array_equal(reconstructed.edge_rest, click_two_start_edge_rest)
+    print(
+        "YOHSAI_UNDO_START_DIFF",
+        f"positions={np.max(np.abs(reconstructed_positions - click_two_start_positions)):.9g}",
+        f"velocities={np.max(np.abs(reconstructed_velocities - click_two_start_velocities)):.9g}",
+        f"orientations={np.max(np.abs(reconstructed_orientations - click_two_start_orientations)):.9g}",
+        f"seams={np.max(np.abs(reconstructed_seams - click_two_start_seams)):.9g}",
+        f"edges_equal={np.array_equal(reconstructed.edges, click_two_start_edges)}",
+        f"edge_rest={np.max(np.abs(reconstructed.edge_rest - click_two_start_edge_rest)):.9g}",
+    )
+    kitsuke._sessions[collection.as_pointer()] = reconstructed
     assert bpy.ops.yohsai.kitsuke() == {"FINISHED"}
     collection = bpy.data.collections[collection_name]
     session = kitsuke._sessions[collection.as_pointer()]

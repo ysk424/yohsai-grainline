@@ -5,7 +5,7 @@ Recorded: 2026-07-11 (Asia/Tokyo)
 Current tested package: Yohsai 0.3.0, Windows x64, Blender 5.2 / Python 3.13,
 Taichi 1.7.4
 
-> Yohsai 0.4.0 makes the native Stable Cosserat CPU backend the default and
+> Yohsai 0.4.1 uses the native Stable Cosserat CPU backend by default and
 > keeps this Taichi implementation as `Legacy Taichi PBD`. Product workflow
 > invariants in this document still apply; current solver construction,
 > parameters, contact behavior, tests, and licensing are in
@@ -311,6 +311,15 @@ relative to the selected part objects. The UI now resolves the selected objects'
 that scope. The required manual sequence is: lock front, simulate back; lock
 back, simulate front; uncheck Lock, then both front and back deform again.
 Manual testing confirmed this sequence works in 0.2.6.
+
+### 0.4.1 high-density mesh
+
+The nominal panel spacing is reduced from 10 mm to 5 mm at the user's request.
+This doubles linear mesh resolution. On the fixed `test2.pdf` integration
+garment, vertex count increases from 4,821 to 19,454 (4.035 times), triangle
+count from 9,212 to 38,030, and sewing constraints from 230 to 448. The full
+source integration test completes ten Stable Cosserat clicks without rollback.
+The earlier 0.1.9 counts remain above as the historical 10 mm baseline.
 
 ## 9. Known limitations
 

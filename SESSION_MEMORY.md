@@ -4,7 +4,8 @@ Status: historical v0.3 handoff; superseded for solver work by `COSSERAT_DESIGN.
 Recorded: 2026-07-11 (Asia/Tokyo)
 Release prepared today: Yohsai 0.3.0
 
-Yohsai 0.4.0 adds the native Stable Cosserat default backend. The product
+Yohsai 0.4.1 uses 5 mm nominal cloth spacing and retains the native Stable
+Cosserat default backend introduced in 0.4.0. The product
 viewpoint below remains authoritative, but current solver state and validation
 must be read from `COSSERAT_DESIGN.md` and `README.md`.
 
@@ -104,6 +105,8 @@ loads a `.blend`, including another file opened in the same process.
 
 Tests:
 
+- `tests/blender_density_check.py`: exact 5 mm production-fixture vertex,
+  triangle, and sewing counts without running a full dressing sequence;
 - `tests/blender_mesh_check.py`: PDF Load, Sewing, repeated Kitsuke, Update, and
   sewing-change rejection;
 - `tests/blender_undo_check.py`: exact seam/velocity Undo and Redo restoration,
@@ -155,4 +158,4 @@ longer than the combined front/back C path. Load creates left/right sleeve
 instances, wraps each into a welded cylinder, and Sewing pairs each closed C
 loop with one composite body C loop.
 
-The expected archive for this handoff is `dist/yohsai-0.3.0.zip`.
+The current expected archive is `dist/yohsai-0.4.1.zip`.

@@ -342,7 +342,7 @@ class NativeCosseratRuntime:
         except Exception:
             pass
 
-    def replace_state(self, positions, velocities, locked) -> None:
+    def replace_state(self, positions, velocities, locked, *, reinitialize_orientations: bool = True) -> None:
         positions_array = _float_array(positions, (self.vertex_count, 3), "positions")
         velocities_array = _float_array(velocities, (self.vertex_count, 3), "velocities")
         locked_array = np.ascontiguousarray(locked, dtype=np.int32)
@@ -354,7 +354,7 @@ class NativeCosseratRuntime:
             _float_pointer(positions_array),
             _float_pointer(velocities_array),
             _int_pointer(locked_array),
-            1,
+            1 if reinitialize_orientations else 0,
         )
 
     def state(self) -> tuple[np.ndarray, np.ndarray]:

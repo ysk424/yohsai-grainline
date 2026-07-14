@@ -271,11 +271,13 @@ stretch rest lengths; the constructed cylinder is the bend rest shape.
 
 ### 10.3 Triangulation
 
-Bezier and line boundaries are sampled at no more than approximately `0.01 m`
-between boundary vertices. The interior is filled with a near-uniform constrained
-triangular mesh at the same nominal spacing. Triangles form the panel topology
-consumed by Yohsai's Taichi solver. `Load` does not create loose sewing-preview
-edges, perform Sewing, or add a Blender Cloth modifier.
+Bezier and line boundaries are sampled at no more than approximately `0.005 m`
+between boundary vertices. The interior is filled with a near-uniform
+constrained triangular mesh at the same nominal spacing. Triangles form the
+panel topology consumed by the selected Kitsuke solver. `Load` does not create
+loose sewing-preview edges, perform Sewing, or add a Blender Cloth modifier.
+Version 0.4.1 halves the 0.4.0 nominal spacing of `0.01 m`, giving approximately
+twice the linear resolution and four times the vertices on comparable panels.
 
 Boundary edge attributes preserve sewing membership as Boolean mesh attributes
 named `sewing_<LABEL>`. Fold edges use the Boolean mesh attribute `fold`.
@@ -386,10 +388,10 @@ Version 0.2.0 uses the tested gravity and seam-closure defaults internally.
 They are solver constants rather than pattern data and do not alter the JSON
 contract.
 
-Version 0.4.0 defaults to the native Stable Cosserat Windows x64 CPU DLL. Legacy
-Taichi PBD remains selectable, chooses an available GPU architecture
-automatically, and uses an explicit CPU fallback. The package supplies Windows
-x64 CPython 3.13 wheels.
+Version 0.4.0 introduced the native Stable Cosserat Windows x64 CPU DLL as the
+default; later versions retain it. Legacy Taichi PBD remains selectable,
+chooses an available GPU architecture automatically, and uses an explicit CPU
+fallback. The package supplies Windows x64 CPython 3.13 wheels.
 
 ## 13. Update
 

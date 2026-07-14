@@ -115,8 +115,10 @@ The native backend is the v0.4 default after passing:
    manual Object Mode placement and monotone aggregate seam reduction;
 4. mirrored RING sleeve construction from `test3.pdf`;
 5. Undo/Redo reconstruction with persisted velocities, seam targets, backend,
-   and orientations (repeat difference below 0.01 mm);
+   and orientations (the v0.4.1 high-density replay is exactly identical);
 6. topology Update, sewing-signature invalidation, and required re-Sewing.
+7. the v0.4.1 5 mm density fixture: 19,454 vertices, 38,030 triangles,
+   448 sewing constraints, and ten Stable Cosserat clicks without rollback.
 
 A recorded side-by-side visual/material comparison with Legacy Taichi remains
 a release-quality task, not a numerical correctness gate. GPU work begins only
