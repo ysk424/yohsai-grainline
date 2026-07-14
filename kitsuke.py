@@ -9,6 +9,7 @@ import numpy as np
 from mathutils import Matrix, Vector
 from mathutils.bvhtree import BVHTree
 
+from .cosserat_native import NativeCosseratError, NativeCosseratRuntime
 from .mesh_loader import SewingError, build_sewing_plan
 
 
@@ -26,13 +27,19 @@ MAX_SPEED_M_PER_SECOND = 1.0
 MAX_CONSTRAINT_CORRECTION_M = 0.005
 MAX_DISPLACEMENT_PER_CLICK_M = 0.1
 DEFAULT_GRAVITY_M_PER_SECOND_SQUARED = 1.0
+KITSUKE_BACKEND_STABLE_COSSERAT = "STABLE_COSSERAT"
+KITSUKE_BACKEND_TAICHI_PBD = "TAICHI_PBD"
+DEFAULT_KITSUKE_BACKEND = KITSUKE_BACKEND_STABLE_COSSERAT
+KITSUKE_BACKENDS = frozenset((KITSUKE_BACKEND_STABLE_COSSERAT, KITSUKE_BACKEND_TAICHI_PBD))
 
 _STATE_EPOCH_KEY = "yohsai_kitsuke_epoch"
 _STATE_REVISION_KEY = "yohsai_kitsuke_revision"
 _STATE_SEAMS_KEY = "yohsai_kitsuke_seams"
 _STATE_SEAM_REST_KEY = "yohsai_kitsuke_seam_rest"
 _STATE_MATRIX_KEY = "yohsai_kitsuke_matrix"
+_STATE_BACKEND_KEY = "yohsai_kitsuke_backend"
 _VELOCITY_ATTRIBUTE = "yohsai_kitsuke_velocity"
+_ORIENTATION_ATTRIBUTES = tuple(f"yohsai_kitsuke_q{axis}" for axis in "wxyz")
 LOCKED_OBJECT_KEY = "yohsai_kitsuke_locked"
 _RUNTIME_EPOCH = uuid4().hex
 
@@ -46,7 +53,7 @@ class _PartRange:
     obj: bpy.types.Object
     start: int
     count: int
-    locked: bool
+    locked: bool = False
 
 
 @dataclass(frozen=True)
@@ -90,9 +97,16 @@ def _read_persisted_state(
     collection: bpy.types.Collection,
     parts: list[_PartRange],
     seam_count: int,
+    backend: str | None = None,
 ) -> tuple[int, np.ndarray, np.ndarray] | None:
     if not _persisted_state_is_current(collection):
         return None
+    stored_backend = str(collection.get(_STATE_BACKEND_KEY, KITSUKE_BACKEND_TAICHI_PBD))
+    if backend is not None and stored_backend != backend:
+        raise KitsukeError(
+            f"The restored Kitsuke state uses {stored_backend}, not {backend}. "
+            "Select the restored solver or restart from Sewing."
+        )
     try:
         revision = int(collection[_STATE_REVISION_KEY])
         seam_rest = np.asarray(collection[_STATE_SEAM_REST_KEY], dtype=np.float32)
@@ -151,8 +165,54 @@ def _write_velocity_state(part: _PartRange, velocities: np.ndarray) -> None:
     attribute.data.foreach_set("vector", np.asarray(velocities, dtype=np.float32).ravel())
 
 
+def _read_orientation_state(parts: list[_PartRange]) -> np.ndarray:
+    blocks: list[np.ndarray] = []
+    for part in parts:
+        components: list[np.ndarray] = []
+        edge_count = len(part.obj.data.edges)
+        for name in _ORIENTATION_ATTRIBUTES:
+            attribute = part.obj.data.attributes.get(name)
+            if (
+                attribute is None
+                or attribute.domain != "EDGE"
+                or attribute.data_type != "FLOAT"
+                or len(attribute.data) != edge_count
+            ):
+                raise KitsukeError(f"{part.obj.name} has no valid Stable Cosserat orientation state for Undo recovery.")
+            values = np.empty(edge_count, dtype=np.float32)
+            attribute.data.foreach_get("value", values)
+            components.append(values)
+        block = np.stack(components, axis=1)
+        norms = np.linalg.norm(block, axis=1)
+        if not np.all(np.isfinite(block)) or np.any(norms < 0.99) or np.any(norms > 1.01):
+            raise KitsukeError(f"{part.obj.name} has an invalid Stable Cosserat orientation state.")
+        blocks.append(block)
+    return np.concatenate(blocks).astype(np.float32)
+
+
+def _write_orientation_state(parts: list[_PartRange], orientations: np.ndarray) -> None:
+    values = np.asarray(orientations, dtype=np.float32)
+    expected = sum(len(part.obj.data.edges) for part in parts)
+    if values.shape != (expected, 4) or not np.all(np.isfinite(values)):
+        raise KitsukeError("Stable Cosserat returned an invalid orientation state.")
+    offset = 0
+    for part in parts:
+        mesh = part.obj.data
+        count = len(mesh.edges)
+        block = values[offset : offset + count]
+        for component, name in enumerate(_ORIENTATION_ATTRIBUTES):
+            attribute = mesh.attributes.get(name)
+            if attribute is not None and (attribute.domain != "EDGE" or attribute.data_type != "FLOAT"):
+                mesh.attributes.remove(attribute)
+                attribute = None
+            if attribute is None:
+                attribute = mesh.attributes.new(name=name, type="FLOAT", domain="EDGE")
+            attribute.data.foreach_set("value", block[:, component])
+        offset += count
+
+
 def _clear_persisted_state(collection: bpy.types.Collection) -> None:
-    for key in (_STATE_EPOCH_KEY, _STATE_REVISION_KEY, _STATE_SEAMS_KEY, _STATE_SEAM_REST_KEY):
+    for key in (_STATE_EPOCH_KEY, _STATE_REVISION_KEY, _STATE_SEAMS_KEY, _STATE_SEAM_REST_KEY, _STATE_BACKEND_KEY):
         if key in collection:
             del collection[key]
     for obj in _parts(collection):
@@ -161,6 +221,10 @@ def _clear_persisted_state(collection: bpy.types.Collection) -> None:
         attribute = obj.data.attributes.get(_VELOCITY_ATTRIBUTE)
         if attribute is not None:
             obj.data.attributes.remove(attribute)
+        for name in _ORIENTATION_ATTRIBUTES:
+            attribute = obj.data.attributes.get(name)
+            if attribute is not None:
+                obj.data.attributes.remove(attribute)
 
 
 def _sewn_preview(collection: bpy.types.Collection) -> bpy.types.Object | None:
@@ -185,6 +249,19 @@ def _pattern_rest_vertices(obj: bpy.types.Object) -> np.ndarray:
     if attribute is None or attribute.domain != "POINT" or len(attribute.data) != len(obj.data.vertices):
         raise KitsukeError(f"{obj.name} has no authoritative flat-pattern coordinates. Load the pattern again.")
     return np.asarray([(item.vector[0], 0.0, item.vector[1]) for item in attribute.data], dtype=np.float32)
+
+
+def _director_rest_vertices(obj: bpy.types.Object) -> np.ndarray:
+    """Return non-degenerate geometry used only to initialize material frames."""
+    if not bool(obj.get("yohsai_ring_closed", False)):
+        return _pattern_rest_vertices(obj)
+    attribute = obj.data.attributes.get("yohsai_construction_position")
+    if attribute is None or attribute.domain != "POINT" or len(attribute.data) != len(obj.data.vertices):
+        raise KitsukeError(f"{obj.name} has no RING construction coordinates for Stable Cosserat directors.")
+    values = np.asarray([tuple(item.vector) for item in attribute.data], dtype=np.float32)
+    if not np.all(np.isfinite(values)):
+        raise KitsukeError(f"{obj.name} has invalid RING construction coordinates.")
+    return values
 
 
 def _edge_constraints(parts: list[_PartRange], rest_positions: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
@@ -382,7 +459,7 @@ def _collision_candidates(
     exclusions: dict[int, set[int]] | None = None,
 ) -> np.ndarray:
     cell_size = COLLISION_SEARCH_M
-    grid = _triangle_grid(triangle_vertices, faces, cell_size, COLLISION_SEARCH_M)
+    grid = _triangle_grid(triangle_vertices, faces, cell_size, CONTACT_THICKNESS_M)
     pairs: list[tuple[int, int]] = []
     for vertex_index, point in enumerate(query_vertices):
         cell = tuple(np.floor(point / cell_size).astype(np.int32))
@@ -396,12 +473,16 @@ def _collision_candidates(
 
 
 def _body_collision_candidates(positions: np.ndarray, body: _BodySnapshot) -> np.ndarray:
-    """Return only the nearest Body triangle for each nearby cloth vertex."""
+    """Return the nearest Body triangle for nearby or penetrating cloth vertices."""
     pairs: list[tuple[int, int]] = []
     for vertex_index, point in enumerate(positions):
         _location, _normal, face_index, _distance = body.bvh.find_nearest(
             Vector(tuple(float(value) for value in point)), COLLISION_SEARCH_M
         )
+        if face_index is None and _inside_body(body, point):
+            _location, _normal, face_index, _distance = body.bvh.find_nearest(
+                Vector(tuple(float(value) for value in point))
+            )
         if face_index is not None:
             pairs.append((vertex_index, int(face_index)))
     if not pairs:
@@ -760,13 +841,14 @@ def _create_runtime_type(ti):
 
 
 class _KitsukeSession:
-    def __init__(self, context, collection, body, preview):
+    def __init__(self, context, collection, body, preview, backend: str):
         objects = _parts(collection)
         if len(objects) < 2:
             raise KitsukeError("Kitsuke needs at least two cloth objects.")
         ranges: list[_PartRange] = []
         position_blocks: list[np.ndarray] = []
         rest_blocks: list[np.ndarray] = []
+        director_rest_blocks: list[np.ndarray] = []
         faces: list[tuple[int, int, int]] = []
         locked_blocks: list[np.ndarray] = []
         offset = 0
@@ -778,14 +860,17 @@ class _KitsukeSession:
             ranges.append(_PartRange(obj, offset, len(block), locked))
             position_blocks.append(block)
             rest_blocks.append(_pattern_rest_vertices(obj))
+            director_rest_blocks.append(_director_rest_vertices(obj))
             locked_blocks.append(np.full(len(block), 1 if locked else 0, dtype=np.int32))
             faces.extend(_triangles(obj.data, offset))
             offset += len(block)
         self.collection = collection
+        self.backend = backend
         self.parts = ranges
         self.positions = np.concatenate(position_blocks).astype(np.float32)
         self.locked = np.concatenate(locked_blocks).astype(np.int32)
         rest_positions = np.concatenate(rest_blocks).astype(np.float32)
+        director_rest_positions = np.concatenate(director_rest_blocks).astype(np.float32)
         self.faces = np.asarray(faces, dtype=np.int32).reshape((-1, 3))
         self.edges, self.edge_rest = _edge_constraints(ranges, rest_positions)
         self.bends, self.bend_rest = _bending_constraints(ranges, rest_positions)
@@ -795,7 +880,7 @@ class _KitsukeSession:
             self.seams = _read_persisted_seams(collection, len(self.positions))
         else:
             self.seams = _seam_constraints_from_parts(collection, ranges)
-        persisted = None if preview is not None else _read_persisted_state(collection, ranges, len(self.seams))
+        persisted = None if preview is not None else _read_persisted_state(collection, ranges, len(self.seams), backend)
         if persisted is None:
             self.revision = 0
             self.velocities = np.zeros_like(self.positions)
@@ -805,21 +890,39 @@ class _KitsukeSession:
         self.body_pointer = body.as_pointer()
         self.matrices = {part.obj.name: _matrix_tuple(part.obj.matrix_world) for part in ranges}
         self.preview = preview
-        _ti, runtime_type = _ensure_taichi()
-        self.runtime = runtime_type(
-            self.positions,
-            self.velocities,
-            self.edges,
-            self.edge_rest,
-            self.bends,
-            self.bend_rest,
-            self.seams,
-            self.faces,
-            self.body,
-            self.locked,
-        )
+        try:
+            if backend == KITSUKE_BACKEND_STABLE_COSSERAT:
+                self.runtime = NativeCosseratRuntime(
+                    self.positions,
+                    self.velocities,
+                    director_rest_positions,
+                    self.edges,
+                    self.edge_rest,
+                    self.seams,
+                    self.faces,
+                    self.body,
+                    self.locked,
+                )
+            else:
+                _ti, runtime_type = _ensure_taichi()
+                self.runtime = runtime_type(
+                    self.positions,
+                    self.velocities,
+                    self.edges,
+                    self.edge_rest,
+                    self.bends,
+                    self.bend_rest,
+                    self.seams,
+                    self.faces,
+                    self.body,
+                    self.locked,
+                )
+        except NativeCosseratError as exc:
+            raise KitsukeError(str(exc)) from exc
         if persisted is not None:
             self.runtime.replace_seam_state(persisted_seams)
+            if backend == KITSUKE_BACKEND_STABLE_COSSERAT:
+                self.runtime.replace_orientation_state(_read_orientation_state(ranges))
         exclusions = _self_exclusions(len(self.positions), self.faces, self.edges, self.seams)
         self.self_exclusions = exclusions
 
@@ -882,19 +985,46 @@ class _KitsukeSession:
             selection = self.velocities[part.start : part.start + part.count]
             _write_velocity_state(part, selection)
             part.obj[_STATE_MATRIX_KEY] = list(_matrix_tuple(part.obj.matrix_world))
+        if self.backend == KITSUKE_BACKEND_STABLE_COSSERAT:
+            _write_orientation_state(self.parts, self.runtime.orientation_state())
         self.revision += 1
         self.collection[_STATE_SEAMS_KEY] = [int(value) for value in self.seams.ravel()]
         self.collection[_STATE_SEAM_REST_KEY] = [float(value) for value in self.runtime.seam_state()]
         self.collection[_STATE_REVISION_KEY] = self.revision
         self.collection[_STATE_EPOCH_KEY] = _RUNTIME_EPOCH
+        self.collection[_STATE_BACKEND_KEY] = self.backend
 
     def advance(self, context, gravity_magnitude: float, seam_closure: float, solver_iterations: int):
         self._read_user_transforms()
-        if _project_body_penetrations(self.body, self.positions, self.velocities, self.locked):
+        # The native solver resolves even deep Body penetrations incrementally so
+        # its material solve can distribute the correction through the sheet.
+        # Legacy PBD still needs its original one-shot preprojection path.
+        if (
+            self.backend != KITSUKE_BACKEND_STABLE_COSSERAT
+            and _project_body_penetrations(self.body, self.positions, self.velocities, self.locked)
+        ):
             self.runtime.replace_state(self.positions, self.velocities, self.locked)
         previous_positions = self.positions.copy()
         previous_velocities = self.velocities.copy()
         previous_seams = self.runtime.seam_state()
+        starting_edge_lengths = np.linalg.norm(
+            previous_positions[self.edges[:, 1]] - previous_positions[self.edges[:, 0]], axis=1
+        )
+        starting_maximum_strain = float(
+            np.max(np.abs(starting_edge_lengths / self.edge_rest - 1.0))
+        )
+        seam_distances = np.linalg.norm(
+            previous_positions[self.seams[:, 1]] - previous_positions[self.seams[:, 0]], axis=1
+        )
+        requested_seam_lengths = np.maximum(0.0, previous_seams - seam_closure)
+        maximum_seam_violation = float(
+            np.max(np.maximum(0.0, seam_distances - requested_seam_lengths))
+        ) if len(seam_distances) else 0.0
+        previous_orientations = (
+            self.runtime.orientation_state()
+            if self.backend == KITSUKE_BACKEND_STABLE_COSSERAT
+            else None
+        )
         body_candidates = _unlocked_body_collision_candidates(self.positions, self.body, self.locked)
         self_candidates = _collision_candidates(
             self.positions,
@@ -902,7 +1032,14 @@ class _KitsukeSession:
             self.faces,
             self.self_exclusions,
         )
-        self.runtime.advance(body_candidates, self_candidates, gravity_magnitude, seam_closure, solver_iterations)
+        try:
+            self.runtime.advance(body_candidates, self_candidates, gravity_magnitude, seam_closure, solver_iterations)
+        except NativeCosseratError as exc:
+            self.runtime.replace_state(previous_positions, previous_velocities, self.locked)
+            self.runtime.replace_seam_state(previous_seams)
+            if previous_orientations is not None:
+                self.runtime.replace_orientation_state(previous_orientations)
+            raise KitsukeError(str(exc)) from exc
         positions, velocities = self.runtime.state()
         displacement = np.linalg.norm(positions - previous_positions, axis=1)
         maximum_displacement = float(displacement.max()) if len(displacement) else 0.0
@@ -915,8 +1052,21 @@ class _KitsukeSession:
             self.velocities = previous_velocities
             self.runtime.replace_state(self.positions, self.velocities, self.locked)
             self.runtime.replace_seam_state(previous_seams)
+            if previous_orientations is not None:
+                self.runtime.replace_orientation_state(previous_orientations)
+            native_detail = ""
+            if self.backend == KITSUKE_BACKEND_STABLE_COSSERAT:
+                stats = self.runtime.last_stats
+                native_detail = (
+                    f", starting strain {starting_maximum_strain:.3g}, "
+                    f"requested seam move {maximum_seam_violation:.3g} m, "
+                    f"native strain {float(stats.get('maximum_edge_strain', 0.0)):.3g}, "
+                    f"stretch energy {float(stats.get('stretch_energy', 0.0)):.3g}, "
+                    f"contacts {int(stats.get('body_candidate_count', 0))}/"
+                    f"{int(stats.get('self_candidate_count', 0))}"
+                )
             raise KitsukeError(
-                f"The simulation became unstable ({maximum_displacement:.3f} m maximum movement) "
+                f"The simulation became unstable ({maximum_displacement:.3f} m maximum movement{native_detail}) "
                 "and was rolled back without changing the cloth."
             )
         self.positions, self.velocities = positions, velocities
@@ -931,9 +1081,12 @@ def advance_kitsuke(
     gravity_magnitude: float,
     seam_closure: float,
     solver_iterations: int = SOLVER_ITERATIONS,
+    backend: str = DEFAULT_KITSUKE_BACKEND,
 ) -> str:
     """Advance one fixed Kitsuke interval and restore the separate cloth objects."""
     solver_iterations = max(MIN_SOLVER_ITERATIONS, min(MAX_SOLVER_ITERATIONS, int(solver_iterations)))
+    if backend not in KITSUKE_BACKENDS:
+        raise KitsukeError(f"Unknown Kitsuke solver backend: {backend}")
     if collection is None or collection.get("yohsai_role") != "clothes":
         raise KitsukeError("No loaded Yohsai clothes collection is selected.")
     key = collection.as_pointer()
@@ -942,14 +1095,28 @@ def advance_kitsuke(
     if session is not None and preview is not None and session.preview is None:
         # Undoing the first Kitsuke restores the verified preview. Reconstruct
         # the transient runtime from that authoritative Blender state.
+        close = getattr(session.runtime, "close", None)
+        if close is not None:
+            close()
         session = None
         _sessions.pop(key, None)
     if session is None:
-        session = _KitsukeSession(context, collection, body, preview)
+        session = _KitsukeSession(context, collection, body, preview, backend)
         _sessions[key] = session
     elif body is None or body.as_pointer() != session.body_pointer:
         raise KitsukeError("The Body used by this Kitsuke session cannot be changed after its first step.")
+    elif backend != session.backend:
+        raise KitsukeError(
+            f"This live Kitsuke session uses {session.backend}. Undo to Sewing or reload the pattern before changing solvers."
+        )
     session.advance(context, gravity_magnitude, seam_closure, solver_iterations)
+    if backend == KITSUKE_BACKEND_STABLE_COSSERAT:
+        stats = session.runtime.last_stats
+        return (
+            f"Kitsuke: Stable Cosserat CPU, {STEPS_PER_CLICK} steps x {solver_iterations} iterations; "
+            f"{session.runtime.angle_count} rod joints, max strain {float(stats.get('maximum_edge_strain', 0.0)):.3g}; "
+            f"seam {seam_closure * 1000.0:.3g} mm"
+        )
     ti, _runtime = _ensure_taichi()
     arch = str(ti.lang.impl.current_cfg().arch).split(".")[-1]
     return (
@@ -959,6 +1126,10 @@ def advance_kitsuke(
 
 
 def clear_sessions() -> None:
+    for session in _sessions.values():
+        close = getattr(session.runtime, "close", None)
+        if close is not None:
+            close()
     _sessions.clear()
 
 
@@ -971,7 +1142,11 @@ def reset_runtime_epoch() -> None:
 
 def clear_kitsuke_session(collection: bpy.types.Collection | None) -> None:
     if collection is not None:
-        _sessions.pop(collection.as_pointer(), None)
+        session = _sessions.pop(collection.as_pointer(), None)
+        if session is not None:
+            close = getattr(session.runtime, "close", None)
+            if close is not None:
+                close()
         _clear_persisted_state(collection)
 
 

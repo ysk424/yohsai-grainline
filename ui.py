@@ -12,14 +12,17 @@ from pathlib import Path
 
 import bpy
 from bpy.app.handlers import persistent
-from bpy.props import BoolProperty, IntProperty, PointerProperty, StringProperty
+from bpy.props import BoolProperty, EnumProperty, IntProperty, PointerProperty, StringProperty
 from bpy.types import Collection, Object, Operator, Panel, PropertyGroup
 
 from .kitsuke import (
     DEFAULT_GRAVITY_M_PER_SECOND_SQUARED,
+    DEFAULT_KITSUKE_BACKEND,
     DEFAULT_SEAM_CLOSURE_PER_CLICK_M,
     KitsukeError,
     LOCKED_OBJECT_KEY,
+    KITSUKE_BACKEND_STABLE_COSSERAT,
+    KITSUKE_BACKEND_TAICHI_PBD,
     MAX_SOLVER_ITERATIONS,
     MIN_SOLVER_ITERATIONS,
     SOLVER_ITERATIONS,
@@ -275,6 +278,23 @@ class YohsaiProperties(PropertyGroup):
         get=_get_lock_selection,
         set=_set_lock_selection,
     )
+    kitsuke_backend: EnumProperty(
+        name="Solver",
+        description="Physics backend used for a new Kitsuke session",
+        items=(
+            (
+                KITSUKE_BACKEND_STABLE_COSSERAT,
+                "Stable Cosserat",
+                "Native CPU rod-graph solver with split position and material-frame updates",
+            ),
+            (
+                KITSUKE_BACKEND_TAICHI_PBD,
+                "Legacy Taichi PBD",
+                "Original Yohsai distance-constraint solver for comparison and recovery",
+            ),
+        ),
+        default=DEFAULT_KITSUKE_BACKEND,
+    )
     kitsuke_iterations: IntProperty(
         name="Iterations",
         description="Kitsuke constraint iterations per substep. Lower this on slow PCs; raise it to reduce cloth stretch.",
@@ -456,6 +476,7 @@ class YOHSAI_OT_kitsuke(Operator):
                 DEFAULT_GRAVITY_M_PER_SECOND_SQUARED,
                 DEFAULT_SEAM_CLOSURE_PER_CLICK_M,
                 props.kitsuke_iterations,
+                props.kitsuke_backend,
             )
         except KitsukeError as exc:
             message = str(exc).strip() or type(exc).__name__
@@ -492,6 +513,7 @@ class YOHSAI_PT_main(Panel):
         lock_row = inputs.row(align=True)
         lock_row.prop(props, "lock_selection")
         lock_row.operator(YOHSAI_OT_lock_auto.bl_idname, text="Auto")
+        inputs.prop(props, "kitsuke_backend")
         inputs.prop(props, "kitsuke_iterations")
         layout.separator(factor=0.4)
         actions = layout.column(align=True)

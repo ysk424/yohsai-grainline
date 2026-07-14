@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import importlib
 import os
 import sys
 import tempfile
@@ -15,15 +16,24 @@ from mathutils import Vector  # noqa: E402
 installed_check = os.environ.get("YOHSAI_INSTALLED_CHECK") == "1"
 if installed_check:
     from bl_ext.user_default import yohsai  # noqa: E402
-    from bl_ext.user_default.yohsai import kitsuke as kitsuke_module, ui  # noqa: E402
+    from bl_ext.user_default.yohsai import (  # noqa: E402
+        kitsuke as kitsuke_module,
+        mesh_loader,
+        ui,
+        yohsai_svg_parser,
+    )
     from bl_ext.user_default.yohsai.mesh_loader import MeshLoadError  # noqa: E402
 else:
-    repo_parent = Path(__file__).resolve().parents[2]
-    sys.path.insert(0, str(repo_parent))
-    import yohsai  # noqa: E402
-    import yohsai.kitsuke as kitsuke_module  # noqa: E402
-    import yohsai.ui as ui  # noqa: E402
-    from yohsai.mesh_loader import MeshLoadError  # noqa: E402
+    repo = Path(__file__).resolve().parents[1]
+    sys.path.insert(0, str(repo / "tests"))
+    from source_package import load_source_package  # noqa: E402
+
+    yohsai = load_source_package(repo)
+    kitsuke_module = sys.modules[f"{yohsai.__name__}.kitsuke"]
+    mesh_loader = sys.modules[f"{yohsai.__name__}.mesh_loader"]
+    ui = sys.modules[f"{yohsai.__name__}.ui"]
+    yohsai_svg_parser = importlib.import_module(f"{yohsai.__name__}.yohsai_svg_parser")
+    MeshLoadError = mesh_loader.MeshLoadError
 
 
 svg_path = Path.home() / "Desktop" / "test2.pdf"
@@ -184,9 +194,9 @@ try:
     assert collection2.name == "CLOTHES_002"
     assert len(collection2.objects) == 2
 
-    # Update recuts labeled panels from the same saved SVG, transfers the
-    # current 3D pose to new topology, and preserves verified sewing when its
-    # authored signature has not changed.
+    # The product UI is PDF-only.  This retained low-level SVG fixture exercises
+    # mesh recutting directly, without pretending SVG is still a supported UI
+    # input format.
     update_svg = """<?xml version="1.0" encoding="UTF-8"?>
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 300 220">
   <g id="CLOTHES">
@@ -204,12 +214,9 @@ try:
     with tempfile.TemporaryDirectory() as update_directory:
         update_path = Path(update_directory) / "update_pattern.svg"
         update_path.write_text(update_svg, encoding="utf-8")
-        bpy.context.scene.yohsai.svg_path = str(update_path)
-        load_update_fixture = bpy.ops.yohsai.load_svg()
-        assert load_update_fixture == {"FINISHED"}
-        ui._parse_process.wait(timeout=30)
-        ui._poll_svg_parser()
-        update_collection = bpy.context.scene.yohsai.clothes_collection
+        update_document = yohsai_svg_parser._parse_legacy_svg(update_path)
+        update_collection = mesh_loader.create_clothes_mesh(bpy.context, update_document)
+        bpy.context.scene.yohsai.clothes_collection = update_collection
         assert update_collection.name == "CLOTHES_003"
         update_parts = sorted(
             (obj for obj in update_collection.objects if obj.get("yohsai_role") == "part"),
@@ -228,11 +235,12 @@ try:
             "L 100 180 Z", "L 95 185 Z"
         ).replace("L 200 60", "L 205 55").replace("L 200 180", "L 205 185")
         update_path.write_text(larger_svg, encoding="utf-8")
-        update_result = bpy.ops.yohsai.update_svg()
-        assert update_result == {"FINISHED"}
-        ui._parse_process.wait(timeout=30)
-        ui._poll_svg_parser()
-        assert bpy.context.scene.yohsai.parse_status.startswith("Updated CLOTHES_003")
+        larger_document = yohsai_svg_parser._parse_legacy_svg(update_path)
+        sewing_changed, _vertex_count = mesh_loader.update_clothes_mesh(
+            bpy.context, update_collection, larger_document
+        )
+        kitsuke_module.clear_kitsuke_session(update_collection)
+        assert not sewing_changed
         assert [obj.as_pointer() for obj in update_parts] == object_pointers
         assert [obj.matrix_world for obj in update_parts] == old_matrices
         assert [len(obj.data.vertices) for obj in update_parts] != old_vertex_counts
@@ -242,11 +250,12 @@ try:
 
         changed_sewing_svg = larger_svg.replace(">A</text>", ">B</text>")
         update_path.write_text(changed_sewing_svg, encoding="utf-8")
-        changed_update = bpy.ops.yohsai.update_svg()
-        assert changed_update == {"FINISHED"}
-        ui._parse_process.wait(timeout=30)
-        ui._poll_svg_parser()
-        assert "Sewing required" in bpy.context.scene.yohsai.parse_status
+        changed_document = yohsai_svg_parser._parse_legacy_svg(update_path)
+        sewing_changed, _vertex_count = mesh_loader.update_clothes_mesh(
+            bpy.context, update_collection, changed_document
+        )
+        kitsuke_module.clear_kitsuke_session(update_collection)
+        assert sewing_changed
         assert not bool(update_collection["yohsai_sewing_verified"])
         try:
             rejected_kitsuke = bpy.ops.yohsai.kitsuke()
@@ -261,12 +270,13 @@ try:
         mesh_pointers = [obj.data.as_pointer() for obj in update_parts]
         wrong_labels_svg = changed_sewing_svg.replace("#back-01", "#back-02")
         update_path.write_text(wrong_labels_svg, encoding="utf-8")
-        failed_update = bpy.ops.yohsai.update_svg()
-        assert failed_update == {"FINISHED"}
-        ui._parse_process.wait(timeout=30)
-        ui._poll_svg_parser()
-        assert "Update failed" in bpy.context.scene.yohsai.parse_status
-        assert "Panel labels changed" in bpy.context.scene.yohsai.parse_status
+        wrong_labels_document = yohsai_svg_parser._parse_legacy_svg(update_path)
+        try:
+            mesh_loader.update_clothes_mesh(bpy.context, update_collection, wrong_labels_document)
+        except mesh_loader.UpdateError as exc:
+            assert "Panel labels changed" in str(exc)
+        else:
+            raise AssertionError("An update with changed panel labels was accepted")
         assert [obj.data.as_pointer() for obj in update_parts] == mesh_pointers
 
     print(

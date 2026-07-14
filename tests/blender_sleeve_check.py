@@ -3,24 +3,30 @@
 from __future__ import annotations
 
 import os
+import importlib
 import sys
 from pathlib import Path
 
 import bpy
+import numpy as np
 
 
 installed_check = os.environ.get("YOHSAI_INSTALLED_CHECK") == "1"
 if installed_check:
-    from bl_ext.user_default.yohsai import mesh_loader, ui, yohsai_svg_parser  # noqa: E402
+    from bl_ext.user_default.yohsai import kitsuke, mesh_loader, ui, yohsai_svg_parser  # noqa: E402
     for wheel in sorted((Path(mesh_loader.__file__).parent / "wheels").glob("*.whl")):
         sys.path.insert(0, str(wheel))
 else:
     repo = Path(__file__).resolve().parents[1]
-    repo_parent = repo.parent
-    sys.path.insert(0, str(repo_parent))
+    sys.path.insert(0, str(repo / "tests"))
     for wheel in sorted((repo / "wheels").glob("*.whl")):
         sys.path.insert(0, str(wheel))
-    from yohsai import mesh_loader, yohsai_svg_parser  # noqa: E402
+    from source_package import load_source_package  # noqa: E402
+
+    package = load_source_package(repo)
+    kitsuke = sys.modules[f"{package.__name__}.kitsuke"]
+    mesh_loader = sys.modules[f"{package.__name__}.mesh_loader"]
+    yohsai_svg_parser = importlib.import_module(f"{package.__name__}.yohsai_svg_parser")
 
 
 source = Path.home() / "Desktop" / "test3.pdf"
@@ -104,8 +110,30 @@ assert all(
     for a, b in c_connections
 )
 
+# RING construction coordinates must also provide a valid non-flat material
+# frame for the native solver.  With no gravity, seam closure, or nearby Body,
+# one short solve should remain finite and close to its constructed rest pose.
+preview = mesh_loader.create_sewn_mesh(bpy.context, collection)
+bpy.ops.mesh.primitive_cube_add(size=1.0, location=(100.0, 100.0, 100.0))
+fixed_body = bpy.context.object
+session = kitsuke._KitsukeSession(
+    bpy.context,
+    collection,
+    fixed_body,
+    preview,
+    kitsuke.KITSUKE_BACKEND_STABLE_COSSERAT,
+)
+ring_start = session.positions.copy()
+try:
+    session.advance(bpy.context, 0.0, 0.0, 4)
+    assert np.all(np.isfinite(session.positions))
+    ring_drift = float(np.linalg.norm(session.positions - ring_start, axis=1).max())
+    assert ring_drift < 0.02, ring_drift
+finally:
+    session.runtime.close()
+
 print(
     "YOHSAI_SLEEVE_OK "
     f"parts={len(parts)} sleeve_C={sleeve_c[0]:.6f} body_C={body_c_per_side:.6f} "
-    f"connections={len(c_connections)}"
+    f"connections={len(c_connections)} cosserat_drift={ring_drift:.6g}"
 )

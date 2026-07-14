@@ -374,19 +374,21 @@ constant within one live runtime.
 
 Version 0.2.0 mirrors exact seam pairs and targets, per-vertex velocity,
 revision, runtime epoch, and accepted Object Mode matrices into undoable Blender
-data after every successful click. Blender `undo_post` and `redo_post` handlers discard the
-non-undoable Taichi objects. The next Kitsuke reconstructs them from the state
-restored by Blender, preventing a 30 mm seam stage from being skipped. Recovery
-data is valid only for the current add-on runtime. Continuing an abandoned
-partially dressed session after reopening Blender or reloading the add-on is
-unsupported.
+data after every successful click. Version 0.4.0 additionally stores the solver
+backend and one Stable Cosserat quaternion per edge. Blender `undo_post` and
+`redo_post` handlers discard non-undoable live runtimes. The next Kitsuke
+reconstructs them from the state restored by Blender, preventing a 30 mm seam
+stage from being skipped. Recovery data is valid only for the current add-on
+runtime. Continuing an abandoned partially dressed session after reopening
+Blender or reloading the add-on is unsupported.
 
 Version 0.2.0 uses the tested gravity and seam-closure defaults internally.
 They are solver constants rather than pattern data and do not alter the JSON
 contract.
 
-Taichi selects an available GPU architecture automatically and uses an explicit
-CPU fallback when GPU initialization fails. The 0.3.0 package supplies Windows
+Version 0.4.0 defaults to the native Stable Cosserat Windows x64 CPU DLL. Legacy
+Taichi PBD remains selectable, chooses an available GPU architecture
+automatically, and uses an explicit CPU fallback. The package supplies Windows
 x64 CPython 3.13 wheels.
 
 ## 13. Update

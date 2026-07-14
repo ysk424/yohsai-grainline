@@ -1,8 +1,12 @@
 # Yohsai session memory
 
-Status: authoritative handoff for the next Codex session  
-Recorded: 2026-07-11 (Asia/Tokyo)  
+Status: historical v0.3 handoff; superseded for solver work by `COSSERAT_DESIGN.md`
+Recorded: 2026-07-11 (Asia/Tokyo)
 Release prepared today: Yohsai 0.3.0
+
+Yohsai 0.4.0 adds the native Stable Cosserat default backend. The product
+viewpoint below remains authoritative, but current solver state and validation
+must be read from `COSSERAT_DESIGN.md` and `README.md`.
 
 ## Product viewpoint that must not drift
 

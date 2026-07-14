@@ -2,10 +2,12 @@
 
 Status: public development preview.
 
-Current version: 0.3.0.
+Current version: 0.4.0.
 
 The authoritative Kitsuke design, tuning log, known limitations, and resume
 checklist are maintained in `KITSUKE_DESIGN.md`.
+The v0.4 native Stable Cosserat backend and its acceptance record are maintained
+in `COSSERAT_DESIGN.md`; `KITSUKE_DESIGN.md` retains the legacy Taichi baseline.
 The product-level pattern-designer perspective and anti-drift rules are
 authoritative in `DESIGN_PHILOSOPHY.md`.
 The latest tested handoff, deferred issues, release procedure, and next priority
@@ -74,21 +76,22 @@ treating Blender mesh identity as authoritative.
   formed by its front and back body paths. The separate source parts remain
   hidden in the same collection for future update work.
 - `Kitsuke` treats the separate panel objects as the editable 3D realization.
-  The first click constructs transient Taichi stretch, bend, sewing,
-  body-contact, and self-contact state; later clicks reuse it while synchronizing
-  supported Object Mode placement. Each click advances a fixed short interval
-  and scatters the result back to the original objects. Translation and rotation
-  clear velocity only on the moved parts.
+  The first click constructs transient native Stable Cosserat edge frames,
+  VBD positions, sewing, Body-contact, and self-contact state; later clicks
+  reuse it while synchronizing supported Object Mode placement. The original
+  Taichi implementation remains selectable as `Legacy Taichi PBD`. Each click
+  advances a fixed short interval and scatters the result back to the original
+  objects. Translation and rotation clear velocity only on the moved parts.
   Sewing maximum distances close by 30 mm per click and ratchet down whenever
   the current seam distance becomes shorter. Seam projection runs after Body
   and self-contact; if a small garment cannot satisfy every constraint, seam
   separation is treated as the unacceptable failure mode, while nearby cloth
   distortion or Body penetration is accepted as the lesser failure. Gravity
-  defaults to 1.0 m/s², and each click uses sixteen 1/240-second substeps. Bend
-  stiffness is reduced from 0.18 to 0.08, maximum constraint correction is
-  10 mm/substep, and maximum velocity is 1.0 m/s. Body contact uses one nearest
-  triangle per cloth vertex, collision corrections are averaged, and unstable
-  steps are rolled back before Blender mesh data is changed.
+  defaults to 1.0 m/s². Stable Cosserat uses eight 1/240-second substeps,
+  sixteen alternating iterations by default, capped 0.5 mm Body corrections,
+  and bounded 1.0 m/s velocity. Body contact uses one nearest triangle per
+  nearby or penetrating cloth vertex; unstable steps are rolled back before
+  Blender mesh data is changed.
   Locked mesh objects remain in the sewing graph but their vertices are fixed
   during Kitsuke; this supports staged dressing and future part-addition
   workflows without inferring garment semantics.

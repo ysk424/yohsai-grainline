@@ -1,9 +1,15 @@
 # Kitsuke Design and Tuning Record
 
-Status: active implementation and empirical tuning  
-Recorded: 2026-07-11 (Asia/Tokyo)  
+Status: legacy Taichi baseline and product-invariant record
+Recorded: 2026-07-11 (Asia/Tokyo)
 Current tested package: Yohsai 0.3.0, Windows x64, Blender 5.2 / Python 3.13,
 Taichi 1.7.4
+
+> Yohsai 0.4.0 makes the native Stable Cosserat CPU backend the default and
+> keeps this Taichi implementation as `Legacy Taichi PBD`. Product workflow
+> invariants in this document still apply; current solver construction,
+> parameters, contact behavior, tests, and licensing are in
+> `COSSERAT_DESIGN.md`.
 
 ## 1. Product idea
 

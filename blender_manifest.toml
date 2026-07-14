@@ -1,7 +1,7 @@
 schema_version = "1.0.0"
 
 id = "yohsai"
-version = "0.3.0"
+version = "0.4.0"
 name = "Yohsai"
 tagline = "Experimental clothing construction tools"
 maintainer = "Yohsai Developers"
@@ -32,13 +32,18 @@ files = "Load pattern PDF and write Yohsai JSON"
 [build]
 paths = [
     "__init__.py",
+    "CMakeLists.txt",
+    "build_native.ps1",
     "ui.py",
     "kitsuke.py",
+    "cosserat_native.py",
     "mesh_loader.py",
     "yohsai_svg_parser.py",
     "yohsai_defaults.json",
     "SVG_TO_JSON_SPEC.md",
     "KITSUKE_DESIGN.md",
+    "COSSERAT_DESIGN.md",
+    "THIRD_PARTY_NOTICES.md",
     "DESIGN_PHILOSOPHY.md",
     "README.md",
     "DEVELOPMENT_NOTES.md",
@@ -46,4 +51,12 @@ paths = [
     "UTIL/silhouette_export.py",
     "UTIL/README.md",
     "LICENSE",
+    "bin/yohsai_cosserat.dll",
+    "native/CMakeLists.txt",
+    "native/include/yohsai_cosserat/c_api.h",
+    "native/src/math.hpp",
+    "native/src/solver.hpp",
+    "native/src/solver.cpp",
+    "native/src/c_api.cpp",
+    "native/tests/test_solver.cpp",
 ]

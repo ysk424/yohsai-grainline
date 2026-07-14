@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import importlib
 import sys
 from pathlib import Path
 
@@ -16,10 +17,16 @@ if installed_check:
     from bl_ext.user_default.yohsai import kitsuke, yohsai_svg_parser
     from bl_ext.user_default.yohsai.mesh_loader import create_clothes_mesh
 else:
-    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-    import yohsai
-    from yohsai import kitsuke, yohsai_svg_parser
-    from yohsai.mesh_loader import create_clothes_mesh
+    repo = Path(__file__).resolve().parents[1]
+    sys.path.insert(0, str(repo / "tests"))
+    for wheel in sorted((repo / "wheels").glob("*.whl")):
+        sys.path.insert(0, str(wheel))
+    from source_package import load_source_package
+
+    yohsai = load_source_package(repo)
+    kitsuke = sys.modules[f"{yohsai.__name__}.kitsuke"]
+    yohsai_svg_parser = importlib.import_module(f"{yohsai.__name__}.yohsai_svg_parser")
+    create_clothes_mesh = sys.modules[f"{yohsai.__name__}.mesh_loader"].create_clothes_mesh
 
 
 source = Path.home() / "Desktop" / "test2.pdf"
@@ -95,8 +102,13 @@ try:
     collection = bpy.data.collections[collection_name]
     session = kitsuke._sessions[collection.as_pointer()]
     assert session.revision == revision_two
-    assert np.array_equal(session.runtime.seam_state(), seam_two)
-    print(f"YOHSAI_UNDO_REDO_OK revisions={revision_one},{revision_two} seams={len(seam_two)}")
+    repeated_seams = session.runtime.seam_state()
+    maximum_seam_delta = float(np.max(np.abs(repeated_seams - seam_two)))
+    assert np.allclose(repeated_seams, seam_two, rtol=0.0, atol=1.0e-5), maximum_seam_delta
+    print(
+        f"YOHSAI_UNDO_REDO_OK revisions={revision_one},{revision_two} "
+        f"seams={len(seam_two)} repeat_delta={maximum_seam_delta:.3g}"
+    )
 finally:
     if not installed_check:
         yohsai.unregister()

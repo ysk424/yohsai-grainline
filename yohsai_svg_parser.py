@@ -25,6 +25,19 @@ SCHEMA_NAME = "yohsai-pattern"
 SCHEMA_VERSION = "1.0.0"
 
 
+def _add_bundled_parser_wheels() -> None:
+    """Make the standalone parser independent of Blender's user site-packages."""
+    wheel_directory = Path(__file__).resolve().parent / "wheels"
+    for pattern in ("typing_extensions-*.whl", "pypdf-*.whl"):
+        for wheel in sorted(wheel_directory.glob(pattern)):
+            value = str(wheel)
+            if value not in sys.path:
+                sys.path.insert(0, value)
+
+
+_add_bundled_parser_wheels()
+
+
 class ParseError(ValueError):
     """A PDF does not satisfy the Yohsai input profile."""
 

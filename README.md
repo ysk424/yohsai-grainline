@@ -1,4 +1,4 @@
-# Yohsai 0.3.0
+# Yohsai 0.4.0 — Stable Cosserat Kitsuke
 
 Yohsai is a public, in-development Blender extension for clothing construction.
 The API, data shape, and generated output are still experimental.
@@ -20,6 +20,8 @@ Below Body, `Lock` marks the currently selected mesh object(s) as excluded from
 Kitsuke deformation. The adjacent `Auto` button is reserved for a later
 automatic selection workflow. Below them are `Load`, `Update`, `Sewing`, and
 `Kitsuke`, in workflow order.
+`Solver` selects the native `Stable Cosserat` backend (the default) or the
+original `Legacy Taichi PBD` backend for comparison and recovery.
 Gravity and seam pull use the tested Yohsai defaults and are no longer exposed
 as N-panel debugging controls.
 
@@ -85,16 +87,28 @@ continuing.
 ## Incremental Kitsuke
 
 After inspecting the `Sewing` preview, select a fixed mesh `Body` and press
-`Kitsuke`. Yohsai constructs a transient Taichi session and advances sixteen
-1/240-second cloth steps. Each click shortens the transient seam maximum
-distance by 30 mm, and every simulation cycle ratchets that maximum down to the
-current seam distance when the seam gets shorter. Seam projection runs after
-Body and self-contact so conflict is resolved by cloth distortion or Body
-penetration before seam separation. Kitsuke defaults to 1.0 m/s² downward acceleration so the user has time
-to reposition parts between clicks. Yohsai then removes the combined preview and
-restores every pattern panel as a separate object. Move and rotate any one or
-more panels in Object Mode, press `Kitsuke` again, and repeat while the seams
-close and the garment approaches the body.
+`Kitsuke`. The default backend constructs a transient native C++ Stable
+Cosserat rod graph. Every panel edge is a segment with its authoritative
+pattern length, each segment owns a unit material-frame quaternion, and
+near-collinear incident edges are paired for bending/twist. Triangle edges
+together preserve the sheet's in-plane metric; RING parts use their non-flat
+construction coordinates only to initialize directors.
+
+Each click advances eight 1/240-second substeps with alternating local VBD
+position sweeps and the Stable Cosserat closed-form orientation update. The
+default 16 nonlinear iterations are followed by material relaxation so local
+seam and contact corrections propagate into the rod graph. Each click shortens
+the transient seam maximum distance by 30 mm. Deep Body penetration is resolved
+over several clicks with capped corrections instead of tearing fine triangles
+in one projection. Self-contact accepts point-triangle pairs only when the
+normal projection lies in the triangle interior, avoiding false in-plane
+repulsion on a flat sheet.
+
+Kitsuke uses 1.0 m/s² downward acceleration so the user has time to reposition
+parts between clicks. Yohsai removes the combined preview and restores every
+pattern panel as a separate object. Move and rotate any panels in Object Mode,
+press `Kitsuke` again, and repeat while seams close and the garment approaches
+the body. `Legacy Taichi PBD` remains selectable for A/B comparison.
 
 Selecting mesh object(s) and enabling `Lock` keeps those objects in the sewing
 graph but removes their vertices from Kitsuke deformation. Lock is exclusive:
@@ -110,23 +124,28 @@ parts retain theirs. The Body is evaluated once for a live session and remains
 a fixed collider. Body/cloth and cloth/cloth contact thickness is 5 mm, while
 paired seam points progressively approach 0 mm.
 The Kitsuke `Iterations` box controls constraint iterations per substep; lower
-it on slow PCs and raise it on strong GPUs/CPUs when stretch is still visible.
+it on slow PCs and raise it on stronger CPUs when stretch is still visible.
 
 Kitsuke supports Blender Undo and Redo. Each successful click stores its exact
-seam vertex pairs and targets, per-vertex velocities, revision, and Object Mode
-transforms in undoable Blender data. After Undo or Redo, the non-undoable Taichi runtime is
-discarded and rebuilt from the restored Blender state before the next click.
+seam vertex pairs and targets, per-vertex velocities, Stable Cosserat edge
+quaternions, revision, and Object Mode transforms in undoable Blender data.
+After Undo or Redo, the non-undoable runtime is discarded and rebuilt from the
+restored Blender state before the next click.
 Opening the file in a new Blender/add-on runtime intentionally ignores that
 recovery state. Continuing an abandoned, partially dressed session across a
 restart is not supported; begin again from Load/Sewing when required.
 
-Taichi chooses an available GPU backend automatically and falls back to the CPU
-only when no GPU backend initializes. Version 0.3.0 bundles the CPython 3.13
-Windows x64 wheels and is packaged for Windows x64.
+The native backend currently runs on the CPU through a versioned C ABI loaded
+with `ctypes`, so it is not tied to Blender's exact CPython patch version.
+The legacy backend asks Taichi for an available GPU and falls back to its CPU.
+Version 0.4.0 bundles the native Windows x64 DLL and the CPython 3.13 Windows
+x64 wheels.
 
 The input and JSON contracts are documented in `SVG_TO_JSON_SPEC.md`.
 The complete Kitsuke workflow, solver invariants, tuning history, current
 parameters, and resume checklist are recorded in `KITSUKE_DESIGN.md`.
+The Stable Cosserat graph mapping, native boundary, contact scope, tests, and
+licensing decisions are recorded in `COSSERAT_DESIGN.md`.
 The pattern-designer viewpoint that governs Update, Sewing, Kitsuke, annotation
 design, and future automation is recorded in `DESIGN_PHILOSOPHY.md`.
 The current resume handoff and deliberately deferred issues are recorded in
@@ -139,11 +158,14 @@ The extension manifest is `blender_manifest.toml`. The source package contains:
 - `__init__.py`
 - `ui.py`
 - `kitsuke.py`
+- `cosserat_native.py`
 - `mesh_loader.py`
 - `yohsai_svg_parser.py`
 - `yohsai_defaults.json`
 - `SVG_TO_JSON_SPEC.md`
 - `KITSUKE_DESIGN.md`
+- `COSSERAT_DESIGN.md`
+- `THIRD_PARTY_NOTICES.md`
 - `DESIGN_PHILOSOPHY.md`
 - `README.md`
 - `DEVELOPMENT_NOTES.md`
@@ -151,7 +173,26 @@ The extension manifest is `blender_manifest.toml`. The source package contains:
 - `UTIL/silhouette_export.py`
 - `UTIL/README.md`
 - `LICENSE`
+- `bin/yohsai_cosserat.dll`
+- `CMakeLists.txt`, `build_native.ps1`, and `native/` (corresponding C++ source
+  and tests for the bundled DLL)
+
+## Native development
+
+Visual Studio 2022 Build Tools and CMake are sufficient for the current CPU
+backend. From a Developer PowerShell, run:
+
+```powershell
+.\build_native.ps1 -Configuration Release
+```
+
+This configures `build/`, builds the DLL and native tests, runs CTest, and
+installs the release DLL to `bin/yohsai_cosserat.dll`. The checked-in DLL lets
+normal Windows users install the Blender extension without a compiler.
 
 ## License
 
-GNU General Public License v3.0 or later.
+GNU General Public License v3.0 or later. The full extension and its source are
+available for independent users to run, study, modify, and redistribute. See
+`THIRD_PARTY_NOTICES.md` for the Stable Cosserat paper and reference-code
+attribution.
