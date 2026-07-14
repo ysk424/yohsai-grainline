@@ -63,14 +63,17 @@ struct NativeSolver {
         float seam_closure,
         int32_t iterations = 0,
         const std::vector<int32_t>& body_candidates = {},
-        const std::vector<int32_t>& self_candidates = {}) {
+        const std::vector<int32_t>& self_candidates = {},
+        bool internal_self_collision = false) {
         ysc_advance_desc desc{};
         std::copy(gravity.begin(), gravity.end(), desc.gravity);
         desc.seam_closure = seam_closure;
         desc.iterations = iterations;
         desc.body_candidate_count = static_cast<int32_t>(body_candidates.size() / 2);
         desc.body_candidates = body_candidates.empty() ? nullptr : body_candidates.data();
-        desc.self_candidate_count = static_cast<int32_t>(self_candidates.size() / 2);
+        desc.self_candidate_count = internal_self_collision
+            ? YSC_INTERNAL_SELF_COLLISION
+            : static_cast<int32_t>(self_candidates.size() / 2);
         desc.self_candidates = self_candidates.empty() ? nullptr : self_candidates.data();
         ysc_stats stats{};
         std::array<char, 512> error{};
@@ -141,12 +144,17 @@ ysc_create_desc chain_desc(
     desc.quads = quads.empty() ? nullptr : quads.data();
     desc.seam_count = static_cast<int32_t>(seams.size() / 2);
     desc.seams = seams.empty() ? nullptr : seams.data();
+    desc.collision_edge_count = static_cast<int32_t>(edges.size() / 2);
+    desc.collision_edges = edges.empty() ? nullptr : edges.data();
     return desc;
 }
 
 void test_api_and_invalid_input() {
     require(ysc_get_api_version() == YSC_API_VERSION, "API version mismatch");
     require(ysc_default_config(nullptr) == YSC_STATUS_INVALID_ARGUMENT, "null default config was accepted");
+    ysc_config defaults{};
+    require(ysc_default_config(&defaults) == YSC_STATUS_OK, "default config failed");
+    require(defaults.extension_compliance == 0.0F, "default fabric is not inextensible");
 
     const std::vector<float> positions{0.0F, 0.0F, 0.0F, 0.0F, 0.0F, 1.0F};
     const std::vector<int32_t> edges{0, 1};
@@ -252,6 +260,10 @@ void test_deep_body_contact_is_incremental() {
     desc.body_faces = body_faces.data();
     ysc_config config = test_config();
     config.iterations = 8;
+    config.maximum_position_correction = 0.005F;
+    // Isolate the contact correction cap from the new material constraint.
+    config.director_alignment_stiffness = 1.0e-6F;
+    config.extension_compliance = 1.0e6F;
     NativeSolver solver(desc, config);
     const ysc_stats stats = solver.advance(
         {0.0F, 0.0F, 0.0F}, 0.0F, 8, std::vector<int32_t>{0, 0});
@@ -259,7 +271,10 @@ void test_deep_body_contact_is_incremental() {
     require(
         solved[2] > positions[2],
         "deep Body contact did not move toward the surface: " + std::to_string(solved[2]));
-    require(solved[2] < -0.04F, "deep Body contact was projected to the surface in one advance");
+    require(
+        solved[2] < -0.04F,
+        "deep Body contact was projected to the surface in one advance: z=" +
+            std::to_string(solved[2]));
     require(stats.maximum_edge_strain < 0.02F, "incremental Body contact tore the test segment");
 }
 
@@ -282,6 +297,118 @@ void test_coplanar_nearby_triangle_does_not_repel() {
     const ysc_stats stats = solver.advance(
         {0.0F, 0.0F, 0.0F}, 0.0F, 1, {}, std::vector<int32_t>{3, 0});
     require(stats.maximum_displacement < 1.0e-5F, "coplanar nearby triangle caused false self-contact");
+}
+
+void test_zero_extension_compliance_is_inextensible() {
+    const std::vector<float> positions{
+        0.0F, 0.0F, 0.0F,
+        0.005F, 0.0F, 0.0F,
+    };
+    const std::vector<int32_t> edges{0, 1};
+    const std::vector<float> edge_rest{0.005F};
+    const std::vector<int32_t> locked{1, 0};
+    const ysc_create_desc desc = chain_desc(positions, positions, edges, edge_rest, locked);
+    ysc_config config = test_config();
+    config.extension_compliance = 0.0F;
+    NativeSolver solver(desc, config);
+    for (int32_t click = 0; click < 10; ++click) {
+        const ysc_stats stats = solver.advance({1000.0F, 0.0F, 0.0F}, 0.0F);
+        require(stats.maximum_edge_strain < 1.0e-5F, "inextensible segment accumulated strain");
+    }
+    const std::vector<float> solved = solver.positions();
+    const float dx = solved[3] - solved[0];
+    const float dy = solved[4] - solved[1];
+    const float dz = solved[5] - solved[2];
+    const float length = std::sqrt(dx * dx + dy * dy + dz * dz);
+    require(std::abs(length - edge_rest[0]) < 5.0e-8F, "5 mm segment did not retain its rest length");
+}
+
+void test_submillimetre_edge_uses_absolute_precision_floor() {
+    const std::vector<float> positions{
+        1.0F, 0.0F, 0.0F,
+        1.0001605F, 0.0F, 0.0F,
+    };
+    const std::vector<int32_t> edges{0, 1};
+    const std::vector<float> edge_rest{0.0001600F};
+    const std::vector<int32_t> locked{1, 1};
+    const ysc_create_desc desc = chain_desc(positions, positions, edges, edge_rest, locked);
+    ysc_config config = test_config();
+    config.extension_compliance = 0.0F;
+    NativeSolver solver(desc, config);
+    const ysc_stats stats = solver.advance({0.0F, 0.0F, 0.0F}, 0.0F);
+    const std::vector<float> solved = solver.positions();
+    const float absolute_error = std::abs(distance(solved.data(), solved.data() + 3) - edge_rest[0]);
+    require(absolute_error <= 1.0e-6F, "submillimetre edge exceeded its absolute precision floor");
+    require(stats.maximum_edge_strain > 1.0e-4F, "short-edge test did not exercise the relative precision gap");
+}
+
+void test_inextensible_grid_projection() {
+    const std::vector<float> rest{
+        0.0F, 0.0F, 0.0F,
+        0.005F, 0.0F, 0.0F,
+        0.005F, 0.005F, 0.0F,
+        0.0F, 0.005F, 0.0F,
+    };
+    std::vector<float> positions = rest;
+    positions[6] += 0.002F;
+    positions[7] += 0.001F;
+    const std::vector<int32_t> edges{0, 1, 1, 2, 2, 3, 3, 0};
+    const std::vector<float> edge_rest(4, 0.005F);
+    const std::vector<int32_t> locked(4, 0);
+    const ysc_create_desc desc = chain_desc(positions, rest, edges, edge_rest, locked);
+    ysc_config config = test_config();
+    config.extension_compliance = 0.0F;
+    NativeSolver solver(desc, config);
+    const ysc_stats stats = solver.advance({0.0F, 0.0F, 0.0F}, 0.0F);
+    require(stats.maximum_edge_strain <= 1.0e-4F, "inextensible grid did not converge globally");
+}
+
+void test_internal_self_collision_and_neighbor_exclusion() {
+    const std::vector<float> positions{
+        0.0F, 0.0F, 0.0F,
+        0.01F, 0.0F, 0.0F,
+        0.0F, 0.01F, 0.0F,
+        0.0025F, 0.0025F, 0.001F,
+        0.0025F, 0.0025F, 0.101F,
+    };
+    const std::vector<int32_t> edges{3, 4};
+    const std::vector<float> edge_rest{0.1F};
+    const std::vector<int32_t> locked{1, 1, 1, 0, 1};
+    const std::vector<int32_t> faces{0, 1, 2};
+    ysc_create_desc desc = chain_desc(positions, positions, edges, edge_rest, locked);
+    desc.face_count = 1;
+    desc.faces = faces.data();
+    ysc_config config = test_config();
+    config.iterations = 1;
+    config.director_alignment_stiffness = 1.0e-6F;
+    config.extension_compliance = 1.0e6F;
+    NativeSolver solver(desc, config);
+    const ysc_stats stats = solver.advance(
+        {0.0F, 0.0F, 0.0F}, 0.0F, 1, {}, {}, true);
+    const std::vector<float> solved = solver.positions();
+    require(
+        solved[11] > 0.0049F,
+        "native broad phase did not project self contact: z=" + std::to_string(solved[11]) +
+            ", candidates=" + std::to_string(stats.self_candidate_count) +
+            ", tests=" + std::to_string(stats.self_candidate_tests));
+    require(stats.self_candidate_count > 0, "native broad phase reported no candidates");
+    require(stats.self_broad_phase_rebuilds == 1, "native broad phase rebuild count is wrong");
+    require(stats.self_candidate_tests == stats.self_candidate_count, "native candidate test count is wrong");
+
+    const std::vector<int32_t> collision_edges{0, 1, 1, 2, 2, 0, 3, 4, 0, 3};
+    ysc_create_desc excluded_desc = chain_desc(positions, positions, edges, edge_rest, locked);
+    excluded_desc.face_count = 1;
+    excluded_desc.faces = faces.data();
+    excluded_desc.collision_edge_count = static_cast<int32_t>(collision_edges.size() / 2);
+    excluded_desc.collision_edges = collision_edges.data();
+    NativeSolver excluded_solver(excluded_desc, config);
+    const ysc_stats excluded_stats = excluded_solver.advance(
+        {0.0F, 0.0F, 0.0F}, 0.0F, 1, {}, {}, true);
+    const std::vector<float> excluded = excluded_solver.positions();
+    require(
+        std::abs(excluded[11] - positions[11]) < 1.0e-6F,
+        "collision one-ring exclusion did not suppress adjacent contact");
+    require(excluded_stats.self_candidate_count == 0, "excluded adjacent face remained a candidate");
 }
 
 void test_grain_quad_rest_and_rigid_transform() {
@@ -343,7 +470,8 @@ void test_grain_quad_shear_and_area_response() {
     shear_desc.material_rest_positions = material.data();
     ysc_config shear_config = test_config();
     shear_config.iterations = 16;
-    shear_config.stretch_stiffness = 1.0e-3F;
+    shear_config.director_alignment_stiffness = 1.0e-3F;
+    shear_config.extension_compliance = 1.0e6F;
     shear_config.quad_area_stiffness = 0.0F;
     NativeSolver shear_solver(shear_desc, shear_config);
     const ysc_stats shear_stats = shear_solver.advance({0.0F, 0.0F, 0.0F}, 0.0F);
@@ -365,7 +493,8 @@ void test_grain_quad_shear_and_area_response() {
     area_desc.material_rest_positions = material.data();
     ysc_config area_config = test_config();
     area_config.iterations = 16;
-    area_config.stretch_stiffness = 1.0e-3F;
+    area_config.director_alignment_stiffness = 1.0e-3F;
+    area_config.extension_compliance = 1.0e6F;
     area_config.quad_shear_stiffness = 0.0F;
     NativeSolver area_solver(area_desc, area_config);
     const ysc_stats area_stats = area_solver.advance({0.0F, 0.0F, 0.0F}, 0.0F);
@@ -407,11 +536,15 @@ void test_gravity_is_finite_and_bounded() {
 int main() {
     try {
         test_api_and_invalid_input();
+        test_zero_extension_compliance_is_inextensible();
+        test_submillimetre_edge_uses_absolute_precision_floor();
+        test_inextensible_grid_projection();
         test_single_segment_rest_state();
         test_rigid_rotation_and_angle_graph();
         test_progressive_seam_and_lock();
         test_deep_body_contact_is_incremental();
         test_coplanar_nearby_triangle_does_not_repel();
+        test_internal_self_collision_and_neighbor_exclusion();
         test_grain_quad_rest_and_rigid_transform();
         test_grain_quad_shear_and_area_response();
         test_gravity_is_finite_and_bounded();

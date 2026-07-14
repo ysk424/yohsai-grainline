@@ -17,7 +17,8 @@
 extern "C" {
 #endif
 
-#define YSC_API_VERSION 2
+#define YSC_API_VERSION 4
+#define YSC_INTERNAL_SELF_COLLISION (-1)
 
 typedef void* ysc_handle;
 
@@ -33,7 +34,10 @@ typedef struct ysc_config {
     float time_step;
     int32_t substeps;
     int32_t iterations;
-    float stretch_stiffness;
+    /* Cosserat segment/director alignment; independent of axial extension. */
+    float director_alignment_stiffness;
+    /* Inverse axial rigidity 1/(EA), SI 1/N. Zero enforces |x_b-x_a|=L0. */
+    float extension_compliance;
     float bend_stiffness;
     float quad_shear_stiffness;
     float quad_area_stiffness;
@@ -67,6 +71,10 @@ typedef struct ysc_create_desc {
     int32_t face_count;
     const int32_t* faces;
 
+    /* Complete Blender/collision mesh edges, including proxy diagonals. */
+    int32_t collision_edge_count;
+    const int32_t* collision_edges;
+
     int32_t body_vertex_count;
     const float* body_positions;
     int32_t body_face_count;
@@ -80,6 +88,8 @@ typedef struct ysc_advance_desc {
 
     int32_t body_candidate_count;
     const int32_t* body_candidates;
+    /* YSC_INTERNAL_SELF_COLLISION asks the solver to build a current native
+       neighbor list. Non-negative values retain the explicit-pair path. */
     int32_t self_candidate_count;
     const int32_t* self_candidates;
 } ysc_advance_desc;
@@ -91,7 +101,10 @@ typedef struct ysc_stats {
     int32_t angle_count;
     int32_t quad_count;
     int32_t body_candidate_count;
+    /* Maximum native neighbor-list size during this advance. */
     int32_t self_candidate_count;
+    int32_t self_broad_phase_rebuilds;
+    int64_t self_candidate_tests;
     float maximum_displacement;
     float maximum_edge_strain;
     float stretch_energy;

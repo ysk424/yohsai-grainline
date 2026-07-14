@@ -433,7 +433,7 @@ class YOHSAI_OT_update_svg(Operator):
 class YOHSAI_OT_sewing(Operator):
     bl_idname = "yohsai.sewing"
     bl_label = "Sewing"
-    bl_description = "Combine the positioned cloth parts and create ordered loose sewing edges"
+    bl_description = "Verify ordered sewing edges and build any annotated construction preview"
     bl_options = {"REGISTER", "UNDO"}
 
     def execute(self, context):
@@ -445,14 +445,20 @@ class YOHSAI_OT_sewing(Operator):
             self.report({"ERROR"}, message)
             return {"CANCELLED"}
         try:
-            sewn_object = create_sewn_mesh(context, collection)
+            sewn_object = create_sewn_mesh(context, collection, props.body_object)
         except Exception as exc:
             message = str(exc).strip() or type(exc).__name__
             props.parse_status = f"Sewing failed: {message[:240]}"
             self.report({"ERROR"}, message)
             return {"CANCELLED"}
-        props.parse_status = f"Sewn {sewn_object.name}"
-        self.report({"INFO"}, f"Created {sewn_object.name}")
+        if bool(sewn_object.get("yohsai_tube_constructed", False)):
+            radius_mm = float(sewn_object.get("yohsai_tube_effective_radius_m", 0.0)) * 1000.0
+            candidates = int(sewn_object.get("yohsai_tube_candidate_count", 0))
+            message = f"Sewn {sewn_object.name}: @TUBE radius {radius_mm:.3g} mm in {candidates} candidates"
+        else:
+            message = f"Sewn {sewn_object.name}"
+        props.parse_status = message
+        self.report({"INFO"}, message)
         return {"FINISHED"}
 
 

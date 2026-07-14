@@ -1,16 +1,22 @@
-# Yohsai 0.5.0 — Grainline Cosserat Kitsuke
+# Yohsai 0.5.3 — Experimental Inextensible Grainline Kitsuke
 
 Yohsai is a public, in-development Blender extension for clothing construction.
 The API, data shape, and generated output are still experimental.
 
 This repository is the `yohsai-grainline` continuation of the validated Stable
-Cosserat implementation. Version 0.5.0 keeps the pattern paper's vertical
-direction as warp and replaces the internal three-direction triangular rod
-network with a grain-aligned square material lattice. Blender rendering and
-collision still use triangles, but each complete square's diagonal is only a
-proxy edge and never a structural Cosserat segment. The fixed material
-convention, equations, attributes, and acceptance record are in
-`GRAINLINE_DESIGN.md`.
+Cosserat implementation. It retains the grain-aligned square material lattice
+and native OpenMP self-contact from 0.5.1. Version 0.5.2 separated axial
+extension compliance from Cosserat director alignment and added an exact
+zero-compliance path for the first non-stretch fabric experiment. Version 0.5.3
+adds the Body-stopped two-panel `@TUBE` construction experiment and a float32
+precision floor limited to sub-1-mm transition edges. The synthetic full-density
+construction and Kitsuke check passes, and the packaged workflow has now been
+accepted by the owner in interactive use. Version 0.5.3 is therefore the current
+main development version. The broader clothing simulation remains experimental,
+and the normal revised flat full-garment fixture still rolls back safely. This
+functional acceptance is not a claim that the fabric model is complete. Its
+equations, evidence, and retained failure record are in
+`FABRIC_EXTENSION_DESIGN.md`.
 
 The Illustrator pattern is authoritative; Blender meshes are replaceable
 physical realizations of that pattern. The normal Yohsai workflow is
@@ -66,10 +72,10 @@ does not rotate the stored material frame. Arbitrary outlines retain a narrow
 triangular transition strip near the cut boundary. Sewing labels and fold edges
 remain mesh attributes; `RING` does not become a sewing variable.
 
-On the fixed `test2.pdf` fixture, v0.5.0 produces 16,948 vertices, 33,018 proxy
-triangles, 15,102 complete material quads, and 448 sewing constraints. The
-linear pitch remains the accepted 5 mm from v0.4.1; a square lattice has fewer
-samples per area than the former staggered triangular lattice at the same pitch.
+The current `test2.pdf` fixture produces 19,692 vertices, 38,468 proxy
+triangles, 17,767 complete material quads, and 448 sewing constraints. The
+linear pitch remains the accepted 5 mm from v0.4.1. Its revised panel labels are
+read as `OMOTE_LAWN60` and `URA_LAWN60`.
 
 On a RING panel, a single-letter sewing marker extends over its complete
 boundary arc between the two RING edges. A closed sleeve `C` can therefore sew
@@ -81,6 +87,15 @@ After positioning the separate parts, `Sewing` infers each seam's direction from
 its endpoints. It preserves the original parts as hidden source objects and
 creates one combined `<collection>_SEWN` mesh with loose sewing-spring edges.
 This step does not add a Cloth modifier.
+
+Version 0.5.3 accepts `@TUBE` inside exactly two flat panels. After the designer
+aligns those panels around the selected
+Body, Sewing identifies exactly two long open warp-direction seam pairs, maps
+them to shared longitudinal rails, and bows the panels into opposing circular
+arches. A bounded search changes effective radius in 10 mm steps and retains
+the clear side of the first 5 mm Body-contact bracket; it evaluates fewer than
+100 direct candidates and never runs a complete solver per radius. Invalid
+topology or a missing contact bracket leaves the pre-Sewing parts unchanged.
 
 ## Pattern Update
 
@@ -121,7 +136,21 @@ the transient seam maximum distance by 30 mm. Deep Body penetration is resolved
 over several clicks with capped corrections instead of tearing fine triangles
 in one projection. Self-contact accepts point-triangle pairs only when the
 normal projection lies in the triangle interior, avoiding false in-plane
-repulsion on a flat sheet.
+repulsion on a flat sheet. The native solver keeps a deterministic spatial-hash
+neighbor list with a 5 mm motion skin, rebuilds it after more than 2.5 mm of
+vertex motion, and performs exact padded triangle-AABB filtering before the
+nonlinear iterations reuse that list.
+
+The v0.5.2 native configuration adds `extension_compliance`. Positive values
+represent inverse axial rigidity `1/(EA)`; the current fixed experimental value
+is zero. Zero activates a simultaneous mass-weighted equality projection for
+all structural rest lengths after each substep. It accepts no more than 0.01%
+relative edge strain and rejects the complete click if the projection cannot
+converge. Cut-boundary transition edges shorter than 1 mm instead use a 1 µm
+absolute floor because their relative target is below float32 resolution at
+metre-scale world coordinates; the normal 5 mm warp/weft gate remains 0.01%.
+Material lookup from `_lawn60` or `_jersey`, JSON schema, parameter
+ranges, and UI are not implemented yet.
 
 Kitsuke uses 1.0 m/s² downward acceleration so the user has time to reposition
 parts between clicks. Yohsai removes the combined preview and restores every
@@ -142,8 +171,9 @@ in the pattern. Moving or rotating a part clears that part's velocity; untouched
 parts retain theirs. The Body is evaluated once for a live session and remains
 a fixed collider. Body/cloth and cloth/cloth contact thickness is 5 mm, while
 paired seam points progressively approach 0 mm.
-The Kitsuke `Iterations` box controls constraint iterations per substep; lower
-it on slow PCs and raise it on stronger CPUs when stretch is still visible.
+The Kitsuke `Iterations` box controls the established material/contact
+iterations per substep. The experimental hard extension projection has its own
+fixed convergence limits and either meets its tolerance or rolls the click back.
 
 Kitsuke supports Blender Undo and Redo. Each successful click stores its exact
 seam vertex pairs and targets, per-vertex velocities, structural Stable
@@ -155,10 +185,12 @@ Opening the file in a new Blender/add-on runtime intentionally ignores that
 recovery state. Continuing an abandoned, partially dressed session across a
 restart is not supported; begin again from Load/Sewing when required.
 
-The native backend currently runs on the CPU through a versioned C ABI loaded
-with `ctypes`, so it is not tied to Blender's exact CPython patch version.
+The native backend currently runs on the CPU through OpenMP and a versioned C
+ABI loaded with `ctypes`, so it is not tied to Blender's exact CPython patch
+version. Candidate lists and contact scratch storage are reused across
+iterations, and parallel results are accumulated per vertex without atomics.
 The legacy backend asks Taichi for an available GPU and falls back to its CPU.
-Version 0.5.0 bundles the native Windows x64 DLL and the CPython 3.13 Windows
+Version 0.5.3 bundles the native Windows x64 DLL and the CPython 3.13 Windows
 x64 wheels.
 
 The input and JSON contracts are documented in `SVG_TO_JSON_SPEC.md`.
@@ -167,8 +199,11 @@ parameters, and resume checklist are recorded in `KITSUKE_DESIGN.md`.
 The Stable Cosserat graph mapping, native boundary, contact scope, tests, and
 licensing decisions are recorded in `COSSERAT_DESIGN.md`.
 The v0.5 grain convention, square-lattice mapping, quad constraints, Blender
-attributes, native ABI v2, and measured acceptance record are in
+attributes, native ABI v4, and measured acceptance record are in
 `GRAINLINE_DESIGN.md`.
+The extension-compliance variable, zero-compliance equations, `_lawn60` and
+`_jersey` naming decisions, and current convergence failure are in
+`FABRIC_EXTENSION_DESIGN.md`.
 The pattern-designer viewpoint that governs Update, Sewing, Kitsuke, annotation
 design, and future automation is recorded in `DESIGN_PHILOSOPHY.md`.
 The current resume handoff and deliberately deferred issues are recorded in
@@ -189,6 +224,7 @@ The extension manifest is `blender_manifest.toml`. The source package contains:
 - `KITSUKE_DESIGN.md`
 - `COSSERAT_DESIGN.md`
 - `GRAINLINE_DESIGN.md`
+- `FABRIC_EXTENSION_DESIGN.md`
 - `THIRD_PARTY_NOTICES.md`
 - `DESIGN_PHILOSOPHY.md`
 - `README.md`
@@ -198,25 +234,28 @@ The extension manifest is `blender_manifest.toml`. The source package contains:
 - `UTIL/README.md`
 - `LICENSE`
 - `bin/yohsai_cosserat.dll`
+- `bin/vcomp140.dll` (Microsoft Visual C++ OpenMP runtime)
 - `CMakeLists.txt`, `build_native.ps1`, and `native/` (corresponding C++ source
   and tests for the bundled DLL)
 
 ## Native development
 
-Visual Studio 2022 Build Tools and CMake are sufficient for the current CPU
-backend. From a Developer PowerShell, run:
+Visual Studio 2022 Build Tools with its standard OpenMP runtime and CMake are
+sufficient for the current CPU backend. From a Developer PowerShell, run:
 
 ```powershell
 .\build_native.ps1 -Configuration Release
 ```
 
 This configures `build/`, builds the DLL and native tests, runs CTest, and
-installs the release DLL to `bin/yohsai_cosserat.dll`. The checked-in DLL lets
-normal Windows users install the Blender extension without a compiler.
+installs the release DLL and Microsoft OpenMP redistributable to `bin/`. The
+checked-in binaries let normal Windows users install the Blender extension
+without a compiler or a separate Visual C++ prerequisite.
 
 ## License
 
-GNU General Public License v3.0 or later. The full extension and its source are
-available for independent users to run, study, modify, and redistribute. See
-`THIRD_PARTY_NOTICES.md` for the Stable Cosserat paper and reference-code
-attribution.
+Yohsai's code is GNU General Public License v3.0 or later and remains available
+for independent users to run, study, modify, and redistribute. The unmodified
+Microsoft OpenMP runtime in the Windows package is a separately licensed
+redistributable. See `THIRD_PARTY_NOTICES.md` for that boundary and for the
+Stable Cosserat paper and reference-code attribution.

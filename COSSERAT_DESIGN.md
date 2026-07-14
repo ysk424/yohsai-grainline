@@ -12,10 +12,10 @@ Object Mode placement, Lock, Undo/Redo, and the separate persistent panel
 objects remain product invariants.
 
 This document records the validated `yohsai-cosserat` v0.4 baseline. Version
-0.5.0 retains its Stable Cosserat position/orientation solve and contact rules,
+0.5.2 retains its Stable Cosserat position/orientation solve and contact rules,
 but replaces the graph construction described below with warp/weft structural
 edges, proxy diagonals, and explicit quad shear/area response. Read
-`GRAINLINE_DESIGN.md` for current behavior.
+`GRAINLINE_DESIGN.md` and `FABRIC_EXTENSION_DESIGN.md` for current behavior.
 
 Stable Cosserat Rods is a one-dimensional rod method, not a triangular shell
 method. The first implementation therefore uses a hybrid graph construction

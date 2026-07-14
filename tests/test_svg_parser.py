@@ -10,11 +10,49 @@ import yohsai_svg_parser as parser
 
 
 class SvgParserTests(unittest.TestCase):
+    @staticmethod
+    def _square_panel(panel_id: str, x: float) -> parser.Panel:
+        points = [
+            parser.Point(x, 0.0),
+            parser.Point(x + 1.0, 0.0),
+            parser.Point(x + 1.0, 1.0),
+            parser.Point(x, 1.0),
+        ]
+        return parser.Panel(
+            panel_id,
+            None,
+            [
+                parser.Segment("line", points[index], points[(index + 1) % len(points)])
+                for index in range(len(points))
+            ],
+            update_label=panel_id,
+        )
+
     def test_svg_input_is_rejected(self) -> None:
         with self.assertRaisesRegex(parser.ParseError, "must be a .pdf"):
             parser.parse_pattern("input.svg")
         with self.assertRaisesRegex(parser.ParseError, "no longer supported"):
             parser.parse_svg("input.svg")
+
+    def test_tube_requires_exactly_two_annotated_panels(self) -> None:
+        first = self._square_panel("FIRST", 0.0)
+        second = self._square_panel("SECOND", 2.0)
+        annotations = [
+            parser.Annotation("@TUBE", parser.Point(0.5, 0.5)),
+            parser.Annotation("@tube", parser.Point(2.5, 0.5)),
+        ]
+        parser._collect_pdf_annotations(annotations, [first, second], set())
+        self.assertTrue(first.tube)
+        self.assertTrue(second.tube)
+
+        first = self._square_panel("FIRST", 0.0)
+        second = self._square_panel("SECOND", 2.0)
+        with self.assertRaisesRegex(parser.ParseError, "exactly two annotated panels"):
+            parser._collect_pdf_annotations(
+                [parser.Annotation("@TUBE", parser.Point(0.5, 0.5))],
+                [first, second],
+                set(),
+            )
 
     @unittest.skipUnless(importlib.util.find_spec("pypdf"), "pypdf is not installed in this test interpreter")
     def test_supplied_illustrator_pdf(self) -> None:
@@ -23,11 +61,15 @@ class SvgParserTests(unittest.TestCase):
             self.skipTest("The user-supplied Desktop/test2.pdf is not available.")
         document = parser.parse_pdf(source)
         self.assertEqual(document["source"]["input_format"], "pdf")
-        self.assertEqual([panel["label"] for panel in document["panels"]], ["OMOTE", "URA"])
+        self.assertEqual(
+            [panel["label"] for panel in document["panels"]],
+            ["OMOTE_LAWN60", "URA_LAWN60"],
+        )
         self.assertNotIn("annotation", document["scale"])
         self.assertNotIn("reference_length_m", document["scale"])
         self.assertNotIn("reference_length_svg", document["scale"])
         self.assertAlmostEqual(document["scale"]["meters_per_svg_unit"], 0.0254 / 72.0)
+        self.assertEqual([panel["tube"] for panel in document["panels"]], [False, False])
         self.assertEqual(len(document["sewing_groups"]["A"]), 2)
         self.assertEqual(len(document["sewing_groups"]["B"]), 4)
         self.assertEqual(

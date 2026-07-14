@@ -9,7 +9,11 @@ import numpy as np
 from mathutils import Matrix, Vector
 from mathutils.bvhtree import BVHTree
 
-from .cosserat_native import NativeCosseratError, NativeCosseratRuntime
+from .cosserat_native import (
+    INEXTENSIBLE_EXTENSION_COMPLIANCE,
+    NativeCosseratError,
+    NativeCosseratRuntime,
+)
 from .mesh_loader import (
     GRAINLINE_EDGE_FAMILY_ATTRIBUTE,
     GRAINLINE_EDGE_PROXY,
@@ -33,6 +37,9 @@ MAX_SPEED_M_PER_SECOND = 1.0
 MAX_CONSTRAINT_CORRECTION_M = 0.005
 MAX_DISPLACEMENT_PER_CLICK_M = 0.1
 DEFAULT_GRAVITY_M_PER_SECOND_SQUARED = 1.0
+# Experimental fabric value until the PDF-referenced material schema is
+# designed. Zero is the native solver's exact inextensible mode.
+KITSUKE_EXTENSION_COMPLIANCE = INEXTENSIBLE_EXTENSION_COMPLIANCE
 KITSUKE_BACKEND_STABLE_COSSERAT = "STABLE_COSSERAT"
 KITSUKE_BACKEND_TAICHI_PBD = "TAICHI_PBD"
 DEFAULT_KITSUKE_BACKEND = KITSUKE_BACKEND_STABLE_COSSERAT
@@ -984,6 +991,17 @@ class _KitsukeSession:
         self.bends, self.bend_rest = _bending_constraints(ranges, rest_positions)
         if preview is not None:
             self.seams = _seam_constraints(preview, ranges)
+            preview_positions = _world_vertices(preview)
+            if len(preview_positions) != len(self.positions) or not np.all(np.isfinite(preview_positions)):
+                raise KitsukeError("The Sewing preview contains invalid construction positions.")
+            # A verified Sewing construction pose is the first transient
+            # simulation state. Flat pattern coordinates remain the material
+            # rest state. @TUBE additionally needs this non-flat geometry for
+            # its initial material director frame; established flat/RING
+            # director initialization remains unchanged.
+            self.positions = preview_positions.astype(np.float32, copy=True)
+            if bool(preview.get("yohsai_tube_constructed", False)):
+                director_rest_positions = self.positions.copy()
         elif _persisted_state_is_current(collection):
             self.seams = _read_persisted_seams(collection, len(self.positions))
         else:
@@ -1010,8 +1028,10 @@ class _KitsukeSession:
                     self.quads,
                     self.seams,
                     self.faces,
+                    self.all_edges,
                     self.body,
                     self.locked,
+                    extension_compliance=KITSUKE_EXTENSION_COMPLIANCE,
                 )
             else:
                 _ti, runtime_type = _ensure_taichi()
@@ -1033,8 +1053,11 @@ class _KitsukeSession:
             self.runtime.replace_seam_state(persisted_seams)
             if backend == KITSUKE_BACKEND_STABLE_COSSERAT:
                 self.runtime.replace_orientation_state(_read_orientation_state(ranges))
-        exclusions = _self_exclusions(len(self.positions), self.faces, self.all_edges, self.seams)
-        self.self_exclusions = exclusions
+        self.self_exclusions = (
+            None
+            if backend == KITSUKE_BACKEND_STABLE_COSSERAT
+            else _self_exclusions(len(self.positions), self.faces, self.all_edges, self.seams)
+        )
 
     def _read_user_transforms(self):
         context_changed = False
@@ -1056,8 +1079,9 @@ class _KitsukeSession:
                 self.velocities[selection] = 0.0
                 self.parts[part_index] = _PartRange(obj, part.start, part.count, locked)
                 context_changed = True
-            if matrix != self.matrices[obj.name] or not np.allclose(
-                block, self.positions[selection], rtol=0.0, atol=1.0e-6
+            if matrix != self.matrices[obj.name] or (
+                self.preview is None
+                and not np.allclose(block, self.positions[selection], rtol=0.0, atol=1.0e-6)
             ):
                 selection = slice(part.start, part.start + part.count)
                 self.positions[selection] = block
@@ -1152,11 +1176,15 @@ class _KitsukeSession:
             else None
         )
         body_candidates = _unlocked_body_collision_candidates(self.positions, self.body, self.locked)
-        self_candidates = _collision_candidates(
-            self.positions,
-            self.positions,
-            self.faces,
-            self.self_exclusions,
+        self_candidates = (
+            None
+            if self.backend == KITSUKE_BACKEND_STABLE_COSSERAT
+            else _collision_candidates(
+                self.positions,
+                self.positions,
+                self.faces,
+                self.self_exclusions,
+            )
         )
         try:
             self.runtime.advance(body_candidates, self_candidates, gravity_magnitude, seam_closure, solver_iterations)
@@ -1237,11 +1265,21 @@ def advance_kitsuke(
         )
     session.advance(context, gravity_magnitude, seam_closure, solver_iterations)
     if backend == KITSUKE_BACKEND_STABLE_COSSERAT:
-        stats = session.runtime.last_stats
+        edge_lengths = np.linalg.norm(
+            session.positions[session.edges[:, 1]] - session.positions[session.edges[:, 0]],
+            axis=1,
+        )
+        edge_errors = np.abs(edge_lengths - session.edge_rest)
+        normal_edges = session.edge_rest >= 0.001
+        maximum_normal_strain = float(
+            np.max(edge_errors[normal_edges] / session.edge_rest[normal_edges])
+        ) if np.any(normal_edges) else 0.0
+        short_edges = ~normal_edges
+        maximum_short_error = float(np.max(edge_errors[short_edges])) if np.any(short_edges) else 0.0
         return (
             f"Kitsuke: Stable Cosserat CPU, {STEPS_PER_CLICK} steps x {solver_iterations} iterations; "
             f"{session.runtime.quad_count} grain quads, {session.runtime.angle_count} rod joints, "
-            f"max strain {float(stats.get('maximum_edge_strain', 0.0)):.3g}; "
+            f"normal strain {maximum_normal_strain:.3g}, short-edge error {maximum_short_error * 1.0e6:.3g} µm; "
             f"seam {seam_closure * 1000.0:.3g} mm"
         )
     ti, _runtime = _ensure_taichi()

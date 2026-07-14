@@ -1,7 +1,7 @@
 schema_version = "1.0.0"
 
 id = "yohsai"
-version = "0.5.0"
+version = "0.5.3"
 name = "Yohsai"
 tagline = "Experimental clothing construction tools"
 maintainer = "Yohsai Developers"
@@ -44,6 +44,7 @@ paths = [
     "KITSUKE_DESIGN.md",
     "COSSERAT_DESIGN.md",
     "GRAINLINE_DESIGN.md",
+    "FABRIC_EXTENSION_DESIGN.md",
     "THIRD_PARTY_NOTICES.md",
     "DESIGN_PHILOSOPHY.md",
     "README.md",
@@ -53,6 +54,7 @@ paths = [
     "UTIL/README.md",
     "LICENSE",
     "bin/yohsai_cosserat.dll",
+    "bin/vcomp140.dll",
     "native/CMakeLists.txt",
     "native/include/yohsai_cosserat/c_api.h",
     "native/src/math.hpp",

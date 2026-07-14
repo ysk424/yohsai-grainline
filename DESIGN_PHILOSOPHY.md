@@ -180,6 +180,8 @@ Implemented construction commands include:
 - `RING`: reserve two boundary edges for topological welding into a tube;
 - `@TOP`: select the circumferential position that faces maximum world Z on a
   RING tube.
+- `@TUBE`: opt two placed flat panels into a Body-stopped Sewing construction
+  pose with two shared longitudinal seam rails and opposing arches.
 
 On a RING panel, a sewing letter marks the complete boundary arc bounded by the
 two RING edges. This lets a sleeve armhole become one closed sewing path. The

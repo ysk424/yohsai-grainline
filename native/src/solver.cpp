@@ -3,9 +3,11 @@
 
 #include <algorithm>
 #include <cmath>
+#include <functional>
 #include <limits>
 #include <set>
 #include <stdexcept>
+#include <string>
 #include <utility>
 
 namespace ysc {
@@ -83,12 +85,20 @@ bool project_to_triangle_interior(
 
 }  // namespace
 
+size_t Solver::GridCellHash::operator()(const GridCell& cell) const noexcept {
+    size_t result = std::hash<int64_t>{}(cell.x);
+    result ^= std::hash<int64_t>{}(cell.y) + 0x9e3779b97f4a7c15ULL + (result << 6U) + (result >> 2U);
+    result ^= std::hash<int64_t>{}(cell.z) + 0x9e3779b97f4a7c15ULL + (result << 6U) + (result >> 2U);
+    return result;
+}
+
 ysc_config default_config() {
     ysc_config config{};
     config.time_step = 1.0F / 240.0F;
     config.substeps = 8;
     config.iterations = 16;
-    config.stretch_stiffness = 2.0e6F;
+    config.director_alignment_stiffness = 2.0e6F;
+    config.extension_compliance = 0.0F;
     config.bend_stiffness = 2.0e-4F;
     config.quad_shear_stiffness = 2.0e5F;
     config.quad_area_stiffness = 2.0e5F;
@@ -119,6 +129,11 @@ Solver::Solver(const ysc_create_desc& desc, const ysc_config& config) : config_(
     }
     if (desc.face_count < 0 || (desc.face_count > 0 && desc.faces == nullptr)) {
         throw std::invalid_argument("create descriptor has invalid face data");
+    }
+    if (
+        desc.collision_edge_count < 0 ||
+        (desc.collision_edge_count > 0 && desc.collision_edges == nullptr)) {
+        throw std::invalid_argument("create descriptor has invalid collision edge data");
     }
     if (
         desc.body_vertex_count < 0 || desc.body_face_count < 0 ||
@@ -206,6 +221,9 @@ Solver::Solver(const ysc_create_desc& desc, const ysc_config& config) : config_(
         }
         seams_.push_back({a, b, length(vertices_[static_cast<size_t>(b)].position - vertices_[static_cast<size_t>(a)].position)});
     }
+    build_self_collision_exclusions(desc);
+    contact_corrections_.resize(vertices_.size());
+    contact_correction_counts_.resize(vertices_.size());
     require_finite_state();
 }
 
@@ -232,7 +250,9 @@ int32_t Solver::seam_count() const noexcept {
 void Solver::validate_config() const {
     if (
         !(config_.time_step > 0.0F) || config_.substeps <= 0 || config_.iterations <= 0 ||
-        !(config_.stretch_stiffness > 0.0F) || config_.bend_stiffness < 0.0F ||
+        !(config_.director_alignment_stiffness > 0.0F) ||
+        config_.extension_compliance < 0.0F || !std::isfinite(config_.extension_compliance) ||
+        config_.bend_stiffness < 0.0F ||
         config_.quad_shear_stiffness < 0.0F || config_.quad_area_stiffness < 0.0F ||
         !std::isfinite(config_.quad_shear_stiffness) || !std::isfinite(config_.quad_area_stiffness) ||
         config_.straight_pair_cosine < -1.0F || config_.straight_pair_cosine > 1.0F ||
@@ -244,6 +264,10 @@ void Solver::validate_config() const {
 }
 
 void Solver::build_segments(const ysc_create_desc& desc) {
+    // Finite regularization of the zero-compliance limit. The global
+    // constrained projection supplies the final equality; this term keeps the
+    // intermediate VBD state close to that manifold.
+    constexpr float kInextensibleExtensionStiffness = 2.0e6F;
     segments_.reserve(static_cast<size_t>(desc.edge_count));
     vertex_segments_.resize(vertices_.size());
     for (int32_t index = 0; index < desc.edge_count; ++index) {
@@ -259,7 +283,14 @@ void Solver::build_segments(const ysc_create_desc& desc) {
         segment.a = a;
         segment.b = b;
         segment.rest_length = rest_length;
-        segment.stretch_stiffness = config_.stretch_stiffness * rest_length;
+        segment.director_alignment_stiffness = config_.director_alignment_stiffness;
+        segment.extension_stiffness_density = config_.extension_compliance == 0.0F
+            ? kInextensibleExtensionStiffness
+            : 1.0F / config_.extension_compliance;
+        if (!std::isfinite(segment.extension_stiffness_density)) {
+            throw std::invalid_argument("extension compliance is too small");
+        }
+        segment.extension_compliance = config_.extension_compliance / rest_length;
         segments_.push_back(segment);
         vertex_segments_[static_cast<size_t>(a)].push_back(index);
         vertex_segments_[static_cast<size_t>(b)].push_back(index);
@@ -415,6 +446,61 @@ void Solver::build_angles() {
     }
 }
 
+void Solver::build_self_collision_exclusions(const ysc_create_desc& desc) {
+    std::vector<std::vector<int32_t>> neighbors(vertices_.size());
+    std::vector<std::vector<int32_t>> vertex_faces(vertices_.size());
+    for (int32_t vertex = 0; vertex < vertex_count(); ++vertex) {
+        neighbors[static_cast<size_t>(vertex)].push_back(vertex);
+    }
+
+    const auto add_edge = [&](int32_t a, int32_t b, const char* label) {
+        validate_index(a, vertex_count(), label);
+        validate_index(b, vertex_count(), label);
+        if (a == b) {
+            throw std::invalid_argument(std::string(label) + " endpoints must be distinct");
+        }
+        neighbors[static_cast<size_t>(a)].push_back(b);
+        neighbors[static_cast<size_t>(b)].push_back(a);
+    };
+
+    for (const Segment& segment : segments_) {
+        add_edge(segment.a, segment.b, "structural collision edge");
+    }
+    for (int32_t index = 0; index < desc.collision_edge_count; ++index) {
+        add_edge(
+            desc.collision_edges[index * 2],
+            desc.collision_edges[index * 2 + 1],
+            "collision edge");
+    }
+    for (const Seam& seam : seams_) {
+        add_edge(seam.a, seam.b, "seam collision edge");
+    }
+    for (int32_t face_index = 0; face_index < static_cast<int32_t>(faces_.size()); ++face_index) {
+        const Face& face = faces_[static_cast<size_t>(face_index)];
+        for (const int32_t vertex : face) {
+            vertex_faces[static_cast<size_t>(vertex)].push_back(face_index);
+        }
+        add_edge(face[0], face[1], "face collision edge");
+        add_edge(face[1], face[2], "face collision edge");
+        add_edge(face[2], face[0], "face collision edge");
+    }
+
+    for (std::vector<int32_t>& incident : neighbors) {
+        std::sort(incident.begin(), incident.end());
+        incident.erase(std::unique(incident.begin(), incident.end()), incident.end());
+    }
+    self_excluded_faces_.resize(vertices_.size());
+    for (int32_t vertex = 0; vertex < vertex_count(); ++vertex) {
+        std::vector<int32_t>& excluded = self_excluded_faces_[static_cast<size_t>(vertex)];
+        for (const int32_t neighbor : neighbors[static_cast<size_t>(vertex)]) {
+            const std::vector<int32_t>& incident = vertex_faces[static_cast<size_t>(neighbor)];
+            excluded.insert(excluded.end(), incident.begin(), incident.end());
+        }
+        std::sort(excluded.begin(), excluded.end());
+        excluded.erase(std::unique(excluded.begin(), excluded.end()), excluded.end());
+    }
+}
+
 void Solver::replace_state(
     const float* positions,
     const float* velocities,
@@ -436,6 +522,7 @@ void Solver::replace_state(
         }
     }
     require_finite_state();
+    self_candidates_valid_ = false;
     if (reinitialize_orientations) {
         initialize_orientations_from_geometry();
     }
@@ -527,10 +614,18 @@ void Solver::position_sweep(float time_step) {
             const Vec3 difference =
                 vertices_[static_cast<size_t>(segment.b)].position - vertices_[static_cast<size_t>(segment.a)].position;
             const Vec3 director = rotate(segment.orientation, {0.0F, 0.0F, 1.0F});
-            const Vec3 constraint = difference / segment.rest_length - director;
-            const float gradient_scale = segment.stretch_stiffness / segment.rest_length;
-            gradient += (vertex_index == segment.a ? -gradient_scale : gradient_scale) * constraint;
-            hessian += segment.stretch_stiffness / (segment.rest_length * segment.rest_length);
+            const float current_length = length(difference);
+            const Vec3 tangent = normalized(difference, director);
+            const Vec3 alignment_gradient =
+                segment.director_alignment_stiffness * (tangent - director);
+            gradient += vertex_index == segment.a ? -alignment_gradient : alignment_gradient;
+            hessian += segment.director_alignment_stiffness /
+                std::max(current_length, segment.rest_length * 1.0e-4F);
+            const float extension_constraint = current_length / segment.rest_length - 1.0F;
+            const Vec3 extension_gradient =
+                (segment.extension_stiffness_density * extension_constraint) * tangent;
+            gradient += vertex_index == segment.a ? -extension_gradient : extension_gradient;
+            hessian += segment.extension_stiffness_density / segment.rest_length;
         }
         for (const int32_t quad_index : vertex_quads_[static_cast<size_t>(vertex_index)]) {
             const Quad& quad = quads_[static_cast<size_t>(quad_index)];
@@ -579,13 +674,203 @@ void Solver::position_sweep(float time_step) {
     }
 }
 
+void Solver::project_inextensible_constraints() {
+    if (config_.extension_compliance != 0.0F) {
+        return;
+    }
+
+    // Solve the mass-weighted minimum position correction subject to all
+    // linearized edge-length equalities at once:
+    //   (J M^-1 J^T) lambda = -C,  delta_x = M^-1 J^T lambda.
+    // A small diagonal regularizer handles redundant constraints in boundary
+    // triangles. Repeating the solve updates the nonlinear edge directions.
+    constexpr int32_t kNonlinearIterations = 320;
+    constexpr int32_t kPcgIterations = 256;
+    constexpr float kRelativeStrainTolerance = 1.0e-4F;
+    // Cut-boundary transition edges can be far shorter than the 5 mm material
+    // lattice. At metre-scale world coordinates their relative 1e-4 target can
+    // fall below float32 position resolution. A one-micrometre absolute floor
+    // applies only below 1 mm; normal warp/weft edges retain the exact 1e-4
+    // relative gate (0.5 micrometre at 5 mm).
+    constexpr float kShortEdgeThreshold = 1.0e-3F;
+    constexpr float kShortEdgeAbsoluteTolerance = 1.0e-6F;
+    constexpr float kPcgRelativeTolerance = 1.0e-5F;
+    constexpr float kRegularization = 1.0e-4F;
+
+    const size_t constraint_count = segments_.size();
+    std::vector<Vec3> normals(constraint_count);
+    std::vector<float> right_hand_side(constraint_count);
+    std::vector<float> diagonal_inverse(constraint_count);
+    std::vector<float> multipliers(constraint_count);
+    std::vector<float> residual(constraint_count);
+    std::vector<float> preconditioned(constraint_count);
+    std::vector<float> direction(constraint_count);
+    std::vector<float> matrix_direction(constraint_count);
+    std::vector<Vec3> vertex_work(vertices_.size());
+
+    const auto dot_vectors = [](const std::vector<float>& a, const std::vector<float>& b) {
+        double result = 0.0;
+        for (size_t index = 0; index < a.size(); ++index) {
+            result += static_cast<double>(a[index]) * static_cast<double>(b[index]);
+        }
+        return result;
+    };
+    const auto constraint_tolerance = [&](const Segment& segment) {
+        return segment.rest_length < kShortEdgeThreshold
+            ? kShortEdgeAbsoluteTolerance
+            : kRelativeStrainTolerance * segment.rest_length;
+    };
+
+    const auto apply_constraint_matrix = [&](const std::vector<float>& input, std::vector<float>& output) {
+        std::fill(vertex_work.begin(), vertex_work.end(), Vec3{});
+        for (size_t index = 0; index < constraint_count; ++index) {
+            const Segment& segment = segments_[index];
+            const Vec3 weighted_normal = input[index] * normals[index];
+            vertex_work[static_cast<size_t>(segment.a)] -= weighted_normal;
+            vertex_work[static_cast<size_t>(segment.b)] += weighted_normal;
+        }
+        for (size_t index = 0; index < vertices_.size(); ++index) {
+            vertex_work[index] *= vertices_[index].inverse_mass;
+        }
+        for (size_t index = 0; index < constraint_count; ++index) {
+            const Segment& segment = segments_[index];
+            output[index] = dot(
+                normals[index],
+                vertex_work[static_cast<size_t>(segment.b)] -
+                    vertex_work[static_cast<size_t>(segment.a)]);
+            output[index] += kRegularization * input[index];
+        }
+    };
+
+    for (int32_t nonlinear_iteration = 0; nonlinear_iteration < kNonlinearIterations; ++nonlinear_iteration) {
+        float maximum_tolerance_ratio = 0.0F;
+        for (size_t index = 0; index < constraint_count; ++index) {
+            const Segment& segment = segments_[index];
+            const Vertex& a = vertices_[static_cast<size_t>(segment.a)];
+            const Vertex& b = vertices_[static_cast<size_t>(segment.b)];
+            const Vec3 difference = b.position - a.position;
+            const float current_length = length(difference);
+            normals[index] = normalized(
+                difference, rotate(segment.orientation, {0.0F, 0.0F, 1.0F}));
+            const float constraint = current_length - segment.rest_length;
+            maximum_tolerance_ratio = std::max(
+                maximum_tolerance_ratio,
+                std::abs(constraint) / constraint_tolerance(segment));
+            const float inverse_mass_sum = a.inverse_mass + b.inverse_mass;
+            if (inverse_mass_sum > 0.0F) {
+                right_hand_side[index] = -constraint;
+                diagonal_inverse[index] = 1.0F / (inverse_mass_sum + kRegularization);
+            } else {
+                right_hand_side[index] = 0.0F;
+                diagonal_inverse[index] = 1.0F / kRegularization;
+            }
+        }
+        if (maximum_tolerance_ratio <= 1.0F) {
+            return;
+        }
+
+        std::fill(multipliers.begin(), multipliers.end(), 0.0F);
+        residual = right_hand_side;
+        for (size_t index = 0; index < constraint_count; ++index) {
+            preconditioned[index] = diagonal_inverse[index] * residual[index];
+        }
+        direction = preconditioned;
+        double residual_preconditioned = dot_vectors(residual, preconditioned);
+        const double initial_residual_norm = std::sqrt(dot_vectors(residual, residual));
+        const double target_residual_norm = std::max(
+            1.0e-10, static_cast<double>(kPcgRelativeTolerance) * initial_residual_norm);
+
+        for (int32_t iteration = 0; iteration < kPcgIterations; ++iteration) {
+            apply_constraint_matrix(direction, matrix_direction);
+            const double denominator = dot_vectors(direction, matrix_direction);
+            if (!(denominator > 1.0e-20) || !std::isfinite(denominator)) {
+                break;
+            }
+            const double step = residual_preconditioned / denominator;
+            for (size_t index = 0; index < constraint_count; ++index) {
+                multipliers[index] += static_cast<float>(step * direction[index]);
+                residual[index] -= static_cast<float>(step * matrix_direction[index]);
+            }
+            if (std::sqrt(dot_vectors(residual, residual)) <= target_residual_norm) {
+                break;
+            }
+            for (size_t index = 0; index < constraint_count; ++index) {
+                preconditioned[index] = diagonal_inverse[index] * residual[index];
+            }
+            const double next_residual_preconditioned = dot_vectors(residual, preconditioned);
+            if (!(next_residual_preconditioned > 0.0) || !std::isfinite(next_residual_preconditioned)) {
+                break;
+            }
+            const double beta = next_residual_preconditioned / residual_preconditioned;
+            for (size_t index = 0; index < constraint_count; ++index) {
+                direction[index] = preconditioned[index] + static_cast<float>(beta * direction[index]);
+            }
+            residual_preconditioned = next_residual_preconditioned;
+        }
+
+        std::fill(vertex_work.begin(), vertex_work.end(), Vec3{});
+        for (size_t index = 0; index < constraint_count; ++index) {
+            const Segment& segment = segments_[index];
+            const Vec3 weighted_normal = multipliers[index] * normals[index];
+            vertex_work[static_cast<size_t>(segment.a)] -= weighted_normal;
+            vertex_work[static_cast<size_t>(segment.b)] += weighted_normal;
+        }
+        float maximum_correction = 0.0F;
+        for (size_t index = 0; index < vertices_.size(); ++index) {
+            vertex_work[index] *= vertices_[index].inverse_mass;
+            maximum_correction = std::max(maximum_correction, length(vertex_work[index]));
+        }
+        const float correction_scale = maximum_correction > config_.maximum_position_correction
+            ? config_.maximum_position_correction / maximum_correction
+            : 1.0F;
+        for (size_t index = 0; index < vertices_.size(); ++index) {
+            vertices_[index].position += correction_scale * vertex_work[index];
+        }
+    }
+
+    float maximum_tolerance_ratio = 0.0F;
+    float maximum_relative_strain = 0.0F;
+    size_t worst_index = 0;
+    float worst_current_length = 0.0F;
+    float worst_absolute_error = 0.0F;
+    for (size_t index = 0; index < segments_.size(); ++index) {
+        const Segment& segment = segments_[index];
+        const float current_length = length(
+            vertices_[static_cast<size_t>(segment.b)].position -
+            vertices_[static_cast<size_t>(segment.a)].position);
+        const float absolute_error = std::abs(current_length - segment.rest_length);
+        const float tolerance_ratio = absolute_error / constraint_tolerance(segment);
+        if (tolerance_ratio > maximum_tolerance_ratio) {
+            maximum_tolerance_ratio = tolerance_ratio;
+            worst_index = index;
+            worst_current_length = current_length;
+            worst_absolute_error = absolute_error;
+        }
+        maximum_relative_strain = std::max(
+            maximum_relative_strain,
+            std::abs(current_length / segment.rest_length - 1.0F));
+    }
+    if (maximum_tolerance_ratio > 1.0F) {
+        const Segment& worst = segments_[worst_index];
+        throw std::runtime_error(
+            "inextensible edge projection did not converge; maximum relative strain=" +
+            std::to_string(maximum_relative_strain) +
+            ", worst segment=" + std::to_string(worst_index) +
+            " (" + std::to_string(worst.a) + "," + std::to_string(worst.b) + ")" +
+            ", rest=" + std::to_string(worst.rest_length) +
+            ", current=" + std::to_string(worst_current_length) +
+            ", absolute error=" + std::to_string(worst_absolute_error) +
+            ", tolerance ratio=" + std::to_string(maximum_tolerance_ratio));
+    }
+}
+
 void Solver::orientation_sweep() {
     const Quat material_axis = pure({0.0F, 0.0F, 1.0F});
     for (int32_t segment_index = 0; segment_index < segment_count(); ++segment_index) {
         Segment& segment = segments_[static_cast<size_t>(segment_index)];
         const Vec3 difference =
             vertices_[static_cast<size_t>(segment.b)].position - vertices_[static_cast<size_t>(segment.a)].position;
-        const Vec3 v = (-2.0F * segment.stretch_stiffness / segment.rest_length) * difference;
+        const Vec3 v = (-2.0F * segment.director_alignment_stiffness) * difference;
         Quat b{0.0F, 0.0F, 0.0F, 0.0F};
         for (const int32_t angle_index : segment_angles_[static_cast<size_t>(segment_index)]) {
             const Angle& angle = angles_[static_cast<size_t>(angle_index)];
@@ -663,6 +948,168 @@ Vec3 Solver::closest_triangle_point(
     return a + v * ab + w * ac;
 }
 
+Solver::GridCell Solver::self_collision_cell(const Vec3& point, float inverse_cell_size) const {
+    constexpr double kCoordinateLimit = 1.0e12;
+    const auto component = [&](float value) -> int64_t {
+        const double scaled = std::floor(static_cast<double>(value) * static_cast<double>(inverse_cell_size));
+        if (!std::isfinite(scaled) || scaled < -kCoordinateLimit || scaled > kCoordinateLimit) {
+            throw std::runtime_error("self-collision grid coordinate is out of range");
+        }
+        return static_cast<int64_t>(scaled);
+    };
+    return {component(point.x), component(point.y), component(point.z)};
+}
+
+bool Solver::self_collision_candidates_need_rebuild() const {
+    if (
+        !self_candidates_valid_ ||
+        self_candidate_reference_positions_.size() != vertices_.size() ||
+        self_candidate_offsets_.size() != vertices_.size() + 1) {
+        return true;
+    }
+    const float rebuild_distance = config_.contact_thickness * 0.5F;
+    const float rebuild_distance_squared = rebuild_distance * rebuild_distance;
+    for (size_t index = 0; index < vertices_.size(); ++index) {
+        if (
+            length_squared(vertices_[index].position - self_candidate_reference_positions_[index]) >
+            rebuild_distance_squared) {
+            return true;
+        }
+    }
+    return false;
+}
+
+void Solver::rebuild_self_collision_candidates() {
+    // The extra contact-thickness skin makes the list valid until any vertex
+    // moves by half that skin.  Query and triangle motion can then consume at
+    // most the full skin before the next rebuild.
+    const float skin = config_.contact_thickness;
+    const float padding = config_.contact_thickness + skin;
+    const float cell_size = 2.0F * padding;
+    const float inverse_cell_size = 1.0F / cell_size;
+    TriangleGrid grid;
+    grid.reserve(std::max<size_t>(1, faces_.size() * 2));
+    grid.max_load_factor(0.7F);
+
+    constexpr uint64_t kMaximumCellsPerFace = 4096;
+    for (int32_t face_index = 0; face_index < static_cast<int32_t>(faces_.size()); ++face_index) {
+        const Face& face = faces_[static_cast<size_t>(face_index)];
+        const Vec3& a = vertices_[static_cast<size_t>(face[0])].position;
+        const Vec3& b = vertices_[static_cast<size_t>(face[1])].position;
+        const Vec3& c = vertices_[static_cast<size_t>(face[2])].position;
+        const Vec3 lower{
+            std::min({a.x, b.x, c.x}) - padding,
+            std::min({a.y, b.y, c.y}) - padding,
+            std::min({a.z, b.z, c.z}) - padding,
+        };
+        const Vec3 upper{
+            std::max({a.x, b.x, c.x}) + padding,
+            std::max({a.y, b.y, c.y}) + padding,
+            std::max({a.z, b.z, c.z}) + padding,
+        };
+        const GridCell first = self_collision_cell(lower, inverse_cell_size);
+        const GridCell last = self_collision_cell(upper, inverse_cell_size);
+        const uint64_t x_count = static_cast<uint64_t>(last.x - first.x) + 1U;
+        const uint64_t y_count = static_cast<uint64_t>(last.y - first.y) + 1U;
+        const uint64_t z_count = static_cast<uint64_t>(last.z - first.z) + 1U;
+        if (
+            x_count > kMaximumCellsPerFace || y_count > kMaximumCellsPerFace ||
+            z_count > kMaximumCellsPerFace ||
+            x_count * y_count > kMaximumCellsPerFace ||
+            x_count * y_count * z_count > kMaximumCellsPerFace) {
+            throw std::runtime_error("self-collision face spans too many grid cells");
+        }
+        for (uint64_t x = 0; x < x_count; ++x) {
+            for (uint64_t y = 0; y < y_count; ++y) {
+                for (uint64_t z = 0; z < z_count; ++z) {
+                    grid[{
+                        first.x + static_cast<int64_t>(x),
+                        first.y + static_cast<int64_t>(y),
+                        first.z + static_cast<int64_t>(z),
+                    }].push_back(face_index);
+                }
+            }
+        }
+    }
+
+    self_candidate_reference_positions_.resize(vertices_.size());
+    self_candidate_vertex_cells_.resize(vertices_.size());
+    self_candidate_build_faces_.resize(vertices_.size());
+    for (int32_t vertex_index = 0; vertex_index < vertex_count(); ++vertex_index) {
+        const size_t vertex_offset = static_cast<size_t>(vertex_index);
+        const Vertex& vertex = vertices_[vertex_offset];
+        self_candidate_reference_positions_[vertex_offset] = vertex.position;
+        self_candidate_vertex_cells_[vertex_offset] = self_collision_cell(vertex.position, inverse_cell_size);
+    }
+    const TriangleGrid& readonly_grid = grid;
+#if defined(_OPENMP)
+    const bool parallel_build = vertices_.size() >= 4096;
+#pragma omp parallel for if(parallel_build) schedule(static)
+#endif
+    for (int32_t vertex_index = 0; vertex_index < vertex_count(); ++vertex_index) {
+        const size_t vertex_offset = static_cast<size_t>(vertex_index);
+        const Vertex& vertex = vertices_[vertex_offset];
+        std::vector<int32_t>& candidates = self_candidate_build_faces_[vertex_offset];
+        candidates.clear();
+        if (vertex.locked) {
+            continue;
+        }
+        const auto cell = readonly_grid.find(self_candidate_vertex_cells_[vertex_offset]);
+        if (cell == readonly_grid.end()) {
+            continue;
+        }
+        const std::vector<int32_t>& excluded = self_excluded_faces_[vertex_offset];
+        for (const int32_t face_index : cell->second) {
+            if (std::binary_search(excluded.begin(), excluded.end(), face_index)) {
+                continue;
+            }
+            const Face& face = faces_[static_cast<size_t>(face_index)];
+            const Vec3& a = vertices_[static_cast<size_t>(face[0])].position;
+            const Vec3& b = vertices_[static_cast<size_t>(face[1])].position;
+            const Vec3& c = vertices_[static_cast<size_t>(face[2])].position;
+            if (
+                vertex.position.x < std::min({a.x, b.x, c.x}) - padding ||
+                vertex.position.x > std::max({a.x, b.x, c.x}) + padding ||
+                vertex.position.y < std::min({a.y, b.y, c.y}) - padding ||
+                vertex.position.y > std::max({a.y, b.y, c.y}) + padding ||
+                vertex.position.z < std::min({a.z, b.z, c.z}) - padding ||
+                vertex.position.z > std::max({a.z, b.z, c.z}) + padding) {
+                continue;
+            }
+            candidates.push_back(face_index);
+        }
+    }
+
+    self_candidate_offsets_.assign(vertices_.size() + 1, 0);
+    size_t total_candidates = 0;
+    for (int32_t vertex_index = 0; vertex_index < vertex_count(); ++vertex_index) {
+        self_candidate_offsets_[static_cast<size_t>(vertex_index)] = static_cast<int32_t>(total_candidates);
+        total_candidates += self_candidate_build_faces_[static_cast<size_t>(vertex_index)].size();
+        if (total_candidates > static_cast<size_t>(std::numeric_limits<int32_t>::max())) {
+            throw std::runtime_error("self-collision candidate list is too large");
+        }
+    }
+    self_candidate_offsets_.back() = static_cast<int32_t>(total_candidates);
+    self_candidate_faces_.resize(total_candidates);
+#if defined(_OPENMP)
+#pragma omp parallel for if(parallel_build) schedule(static)
+#endif
+    for (int32_t vertex_index = 0; vertex_index < vertex_count(); ++vertex_index) {
+        const size_t vertex_offset = static_cast<size_t>(vertex_index);
+        const std::vector<int32_t>& candidates = self_candidate_build_faces_[vertex_offset];
+        std::copy(
+            candidates.begin(),
+            candidates.end(),
+            self_candidate_faces_.begin() + self_candidate_offsets_[vertex_offset]);
+    }
+    self_candidates_valid_ = true;
+}
+
+void Solver::clear_contact_corrections() {
+    std::fill(contact_corrections_.begin(), contact_corrections_.end(), Vec3{});
+    std::fill(contact_correction_counts_.begin(), contact_correction_counts_.end(), 0);
+}
+
 void Solver::project_body_contacts(const int32_t* candidates, int32_t count) {
     if (count <= 0) {
         return;
@@ -670,13 +1117,10 @@ void Solver::project_body_contacts(const int32_t* candidates, int32_t count) {
     if (candidates == nullptr) {
         throw std::invalid_argument("Body candidate pointer is null");
     }
-    std::vector<Vec3> corrections(vertices_.size(), Vec3{});
-    std::vector<int32_t> correction_counts(vertices_.size(), 0);
+    clear_contact_corrections();
     for (int32_t index = 0; index < count; ++index) {
         const int32_t vertex_index = candidates[index * 2];
         const int32_t face_index = candidates[index * 2 + 1];
-        validate_index(vertex_index, vertex_count(), "Body candidate vertex");
-        validate_index(face_index, static_cast<int32_t>(body_faces_.size()), "Body candidate face");
         Vertex& vertex = vertices_[static_cast<size_t>(vertex_index)];
         if (vertex.locked) {
             continue;
@@ -694,14 +1138,14 @@ void Solver::project_body_contacts(const int32_t* candidates, int32_t count) {
         // the capped correction below lets VBD resolve it without tearing the
         // local edge network in a single projection.
         if (signed_distance < config_.contact_thickness) {
-            corrections[static_cast<size_t>(vertex_index)] +=
+            contact_corrections_[static_cast<size_t>(vertex_index)] +=
                 normal * (config_.contact_thickness - signed_distance);
-            ++correction_counts[static_cast<size_t>(vertex_index)];
+            ++contact_correction_counts_[static_cast<size_t>(vertex_index)];
         }
     }
     for (size_t index = 0; index < vertices_.size(); ++index) {
-        if (correction_counts[index] > 0) {
-            Vec3 correction = corrections[index] / static_cast<float>(correction_counts[index]);
+        if (contact_correction_counts_[index] > 0) {
+            Vec3 correction = contact_corrections_[index] / static_cast<float>(contact_correction_counts_[index]);
             // Contact is intentionally continued over several Kitsuke clicks.
             // Applying the full VBD correction cap on every inner iteration can
             // pull a panel through an entire torso-sized depth in one click and
@@ -720,13 +1164,10 @@ void Solver::project_self_contacts(const int32_t* candidates, int32_t count) {
     if (candidates == nullptr) {
         throw std::invalid_argument("self-contact candidate pointer is null");
     }
-    std::vector<Vec3> corrections(vertices_.size(), Vec3{});
-    std::vector<int32_t> correction_counts(vertices_.size(), 0);
+    clear_contact_corrections();
     for (int32_t index = 0; index < count; ++index) {
         const int32_t vertex_index = candidates[index * 2];
         const int32_t face_index = candidates[index * 2 + 1];
-        validate_index(vertex_index, vertex_count(), "self-contact candidate vertex");
-        validate_index(face_index, static_cast<int32_t>(faces_.size()), "self-contact candidate face");
         Vertex& vertex = vertices_[static_cast<size_t>(vertex_index)];
         if (vertex.locked) {
             continue;
@@ -743,14 +1184,14 @@ void Solver::project_self_contacts(const int32_t* candidates, int32_t count) {
                 continue;
             }
             const Vec3 direction = signed_distance >= 0.0F ? normal : -normal;
-            corrections[static_cast<size_t>(vertex_index)] +=
+            contact_corrections_[static_cast<size_t>(vertex_index)] +=
                 direction * (config_.contact_thickness - distance);
-            ++correction_counts[static_cast<size_t>(vertex_index)];
+            ++contact_correction_counts_[static_cast<size_t>(vertex_index)];
         }
     }
     for (size_t index = 0; index < vertices_.size(); ++index) {
-        if (correction_counts[index] > 0) {
-            Vec3 correction = corrections[index] / static_cast<float>(correction_counts[index]);
+        if (contact_correction_counts_[index] > 0) {
+            Vec3 correction = contact_corrections_[index] / static_cast<float>(contact_correction_counts_[index]);
             correction = clamp_length(correction, config_.maximum_position_correction);
             vertices_[index].position += correction;
             vertices_[index].predicted += correction;
@@ -758,9 +1199,71 @@ void Solver::project_self_contacts(const int32_t* candidates, int32_t count) {
     }
 }
 
+int32_t Solver::project_internal_self_contacts(bool& rebuilt) {
+    rebuilt = self_collision_candidates_need_rebuild();
+    if (rebuilt) {
+        rebuild_self_collision_candidates();
+    }
+    const int32_t candidate_count = static_cast<int32_t>(self_candidate_faces_.size());
+#if defined(_OPENMP)
+    const bool use_parallel = candidate_count >= 4096;
+#pragma omp parallel if(use_parallel)
+#endif
+    {
+#if defined(_OPENMP)
+#pragma omp for schedule(static)
+#endif
+        for (int32_t vertex_index = 0; vertex_index < vertex_count(); ++vertex_index) {
+            const size_t vertex_offset = static_cast<size_t>(vertex_index);
+            Vertex& vertex = vertices_[vertex_offset];
+            Vec3 correction{};
+            int32_t correction_count = 0;
+            if (!vertex.locked) {
+                const int32_t begin = self_candidate_offsets_[vertex_offset];
+                const int32_t end = self_candidate_offsets_[vertex_offset + 1];
+                for (int32_t candidate = begin; candidate < end; ++candidate) {
+                    const int32_t face_index = self_candidate_faces_[static_cast<size_t>(candidate)];
+                    const Face& face = faces_[static_cast<size_t>(face_index)];
+                    const Vec3& a = vertices_[static_cast<size_t>(face[0])].position;
+                    const Vec3& b = vertices_[static_cast<size_t>(face[1])].position;
+                    const Vec3& c = vertices_[static_cast<size_t>(face[2])].position;
+                    Vec3 normal;
+                    float signed_distance = 0.0F;
+                    if (!project_to_triangle_interior(vertex.position, a, b, c, normal, signed_distance)) {
+                        continue;
+                    }
+                    const float distance = std::abs(signed_distance);
+                    if (distance >= config_.contact_thickness) {
+                        continue;
+                    }
+                    const Vec3 direction = signed_distance >= 0.0F ? normal : -normal;
+                    correction += direction * (config_.contact_thickness - distance);
+                    ++correction_count;
+                }
+            }
+            contact_corrections_[vertex_offset] = correction;
+            contact_correction_counts_[vertex_offset] = correction_count;
+        }
+#if defined(_OPENMP)
+#pragma omp for schedule(static)
+#endif
+        for (int32_t vertex_index = 0; vertex_index < vertex_count(); ++vertex_index) {
+            const size_t vertex_offset = static_cast<size_t>(vertex_index);
+            if (contact_correction_counts_[vertex_offset] <= 0) {
+                continue;
+            }
+            Vec3 correction = contact_corrections_[vertex_offset] /
+                static_cast<float>(contact_correction_counts_[vertex_offset]);
+            correction = clamp_length(correction, config_.maximum_position_correction);
+            vertices_[vertex_offset].position += correction;
+            vertices_[vertex_offset].predicted += correction;
+        }
+    }
+    return candidate_count;
+}
+
 void Solver::project_seams() {
-    std::vector<Vec3> corrections(vertices_.size(), Vec3{});
-    std::vector<int32_t> correction_counts(vertices_.size(), 0);
+    clear_contact_corrections();
     for (const Seam& seam : seams_) {
         Vertex& a = vertices_[static_cast<size_t>(seam.a)];
         Vertex& b = vertices_[static_cast<size_t>(seam.b)];
@@ -775,17 +1278,18 @@ void Solver::project_seams() {
         }
         const Vec3 correction = difference * (((distance - seam.maximum_length) / static_cast<float>(unlocked)) / distance);
         if (!a.locked) {
-            corrections[static_cast<size_t>(seam.a)] += correction;
-            ++correction_counts[static_cast<size_t>(seam.a)];
+            contact_corrections_[static_cast<size_t>(seam.a)] += correction;
+            ++contact_correction_counts_[static_cast<size_t>(seam.a)];
         }
         if (!b.locked) {
-            corrections[static_cast<size_t>(seam.b)] -= correction;
-            ++correction_counts[static_cast<size_t>(seam.b)];
+            contact_corrections_[static_cast<size_t>(seam.b)] -= correction;
+            ++contact_correction_counts_[static_cast<size_t>(seam.b)];
         }
     }
     for (size_t index = 0; index < vertices_.size(); ++index) {
-        if (correction_counts[index] > 0) {
-            vertices_[index].position += corrections[index] / static_cast<float>(correction_counts[index]);
+        if (contact_correction_counts_[index] > 0) {
+            vertices_[index].position +=
+                contact_corrections_[index] / static_cast<float>(contact_correction_counts_[index]);
         }
     }
 }
@@ -829,9 +1333,14 @@ void Solver::compute_energy(float& stretch, float& bend, float& shear, float& ar
     for (const Segment& segment : segments_) {
         const Vec3 difference =
             vertices_[static_cast<size_t>(segment.b)].position - vertices_[static_cast<size_t>(segment.a)].position;
-        const Vec3 constraint =
-            difference / segment.rest_length - rotate(segment.orientation, {0.0F, 0.0F, 1.0F});
-        stretch += 0.5F * segment.stretch_stiffness * length_squared(constraint);
+        const float current_length = length(difference);
+        const Vec3 director = rotate(segment.orientation, {0.0F, 0.0F, 1.0F});
+        stretch += segment.director_alignment_stiffness *
+            std::max(0.0F, current_length - dot(difference, director));
+        if (segment.extension_compliance > 0.0F) {
+            const float constraint = current_length / segment.rest_length - 1.0F;
+            stretch += 0.5F * constraint * constraint / segment.extension_compliance;
+        }
     }
     for (const Angle& angle : angles_) {
         const Quat relative = normalized(
@@ -876,7 +1385,7 @@ ysc_stats Solver::advance(const ysc_advance_desc& desc) {
     if (
         !std::isfinite(desc.gravity[0]) || !std::isfinite(desc.gravity[1]) || !std::isfinite(desc.gravity[2]) ||
         !std::isfinite(desc.seam_closure) || desc.seam_closure < 0.0F ||
-        desc.body_candidate_count < 0 || desc.self_candidate_count < 0) {
+        desc.body_candidate_count < 0 || desc.self_candidate_count < YSC_INTERNAL_SELF_COLLISION) {
         throw std::invalid_argument("advance descriptor contains an invalid value");
     }
     if (desc.body_candidate_count > 0 && desc.body_candidates == nullptr) {
@@ -884,6 +1393,22 @@ ysc_stats Solver::advance(const ysc_advance_desc& desc) {
     }
     if (desc.self_candidate_count > 0 && desc.self_candidates == nullptr) {
         throw std::invalid_argument("advance descriptor has no self-contact candidates");
+    }
+    for (int32_t index = 0; index < desc.body_candidate_count; ++index) {
+        validate_index(desc.body_candidates[index * 2], vertex_count(), "Body candidate vertex");
+        validate_index(
+            desc.body_candidates[index * 2 + 1],
+            static_cast<int32_t>(body_faces_.size()),
+            "Body candidate face");
+    }
+    if (desc.self_candidate_count >= 0) {
+        for (int32_t index = 0; index < desc.self_candidate_count; ++index) {
+            validate_index(desc.self_candidates[index * 2], vertex_count(), "self-contact candidate vertex");
+            validate_index(
+                desc.self_candidates[index * 2 + 1],
+                static_cast<int32_t>(faces_.size()),
+                "self-contact candidate face");
+        }
     }
     const int32_t iterations = desc.iterations > 0 ? desc.iterations : config_.iterations;
     const Vec3 gravity{desc.gravity[0], desc.gravity[1], desc.gravity[2]};
@@ -894,6 +1419,9 @@ ysc_stats Solver::advance(const ysc_advance_desc& desc) {
     }
 
     const float seam_closure_per_substep = desc.seam_closure / static_cast<float>(config_.substeps);
+    int32_t maximum_self_candidate_count = std::max(0, desc.self_candidate_count);
+    int32_t self_broad_phase_rebuilds = 0;
+    int64_t self_candidate_tests = 0;
     for (int32_t substep = 0; substep < config_.substeps; ++substep) {
         for (Seam& seam : seams_) {
             seam.maximum_length = std::max(0.0F, seam.maximum_length - seam_closure_per_substep);
@@ -903,7 +1431,19 @@ ysc_stats Solver::advance(const ysc_advance_desc& desc) {
         ratchet_seams();
         for (int32_t iteration = 0; iteration < iterations; ++iteration) {
             project_body_contacts(desc.body_candidates, desc.body_candidate_count);
-            project_self_contacts(desc.self_candidates, desc.self_candidate_count);
+            int32_t current_self_candidate_count = desc.self_candidate_count;
+            if (desc.self_candidate_count == YSC_INTERNAL_SELF_COLLISION) {
+                bool rebuilt = false;
+                current_self_candidate_count = project_internal_self_contacts(rebuilt);
+                if (rebuilt) {
+                    ++self_broad_phase_rebuilds;
+                }
+                maximum_self_candidate_count = std::max(
+                    maximum_self_candidate_count, current_self_candidate_count);
+            } else {
+                project_self_contacts(desc.self_candidates, desc.self_candidate_count);
+            }
+            self_candidate_tests += static_cast<int64_t>(current_self_candidate_count);
             for (int32_t pass = 0; pass < config_.seam_projection_passes; ++pass) {
                 project_seams();
             }
@@ -921,6 +1461,8 @@ ysc_stats Solver::advance(const ysc_advance_desc& desc) {
             position_sweep(config_.time_step);
             orientation_sweep();
         }
+        project_inextensible_constraints();
+        orientation_sweep();
         finish_substep(config_.time_step);
         require_finite_state();
     }
@@ -932,7 +1474,9 @@ ysc_stats Solver::advance(const ysc_advance_desc& desc) {
     stats.angle_count = angle_count();
     stats.quad_count = quad_count();
     stats.body_candidate_count = desc.body_candidate_count;
-    stats.self_candidate_count = desc.self_candidate_count;
+    stats.self_candidate_count = maximum_self_candidate_count;
+    stats.self_broad_phase_rebuilds = self_broad_phase_rebuilds;
+    stats.self_candidate_tests = self_candidate_tests;
     for (size_t index = 0; index < vertices_.size(); ++index) {
         stats.maximum_displacement = std::max(
             stats.maximum_displacement,

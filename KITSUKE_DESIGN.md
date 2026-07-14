@@ -5,11 +5,12 @@ Recorded: 2026-07-11 (Asia/Tokyo)
 Current tested package: Yohsai 0.3.0, Windows x64, Blender 5.2 / Python 3.13,
 Taichi 1.7.4
 
-> Yohsai 0.5.0 uses the native Grainline Stable Cosserat CPU backend by default and
+> Yohsai 0.5.3 uses the native Grainline Stable Cosserat CPU/OpenMP backend by default and
 > keeps this Taichi implementation as `Legacy Taichi PBD`. Product workflow
 > invariants in this document still apply; current solver construction,
 > parameters, contact behavior, tests, and licensing are in
-> `GRAINLINE_DESIGN.md` (with the v0.4 baseline in `COSSERAT_DESIGN.md`).
+> `GRAINLINE_DESIGN.md` and `FABRIC_EXTENSION_DESIGN.md` (with the v0.4
+> baseline in `COSSERAT_DESIGN.md`).
 
 ## 1. Product idea
 
@@ -33,11 +34,12 @@ topology change returns to the pattern and starts a new Load.
 1. `Load` creates one Mesh object for every pattern panel instance; `@M`
    expands one authored panel into LEFT and RIGHT instances.
 2. The user translates and rotates the separate panels around the character.
-3. `Sewing` constructs a combined preview with loose sewing edges.
-4. The user visually checks sewing correspondence and agreement with the
+3. The user selects the character's actual skin Mesh as `Body`; @TUBE Sewing
+   needs it while ordinary Sewing may still proceed without it.
+4. `Sewing` constructs a combined preview with loose sewing edges.
+5. The user visually checks sewing correspondence and agreement with the
    pattern. If it is wrong, the user returns to the pattern rather than fixing
    topology in Blender.
-5. The user selects the character's actual skin Mesh as `Body`.
 6. One `Kitsuke` click constructs transient sewing and physics state, advances a
    short interval, then restores the separate panel objects.
 7. The user translates and rotates any one or more objects in Object Mode.
@@ -57,7 +59,8 @@ Mode translation and rotation, which are required during dressing.
 For the first click, and after Undo/Redo invalidates a runtime, Kitsuke builds
 the transient indexed state. Every click then performs this round trip:
 
-1. Read current world-space vertices and transforms from all panel objects.
+1. Read current world-space vertices and transforms from all panel objects, or
+   the verified non-flat @TUBE preview on its first click.
 2. Synchronize the live runtime, or reconstruct it when none is valid.
 3. Use sewing constraints from the verified Sewing preview/recovery state.
 4. Advance Taichi stretch, approximate bend, sewing, gravity, Body contact, and
@@ -67,7 +70,9 @@ the transient indexed state. Every click then performs this round trip:
 7. Show and select the separate panel objects again.
 
 The initial Sewing preview is both a visual verification object and the record
-from which the first session captures exact seam vertex pairs. Later clicks
+from which the first session captures exact seam vertex pairs. For @TUBE it
+also owns the first transient positions and director frame; flat pattern
+coordinates continue to own material rest lengths. Later clicks
 reuse the live Taichi runtime while synchronizing supported Object Mode changes.
 Undo and Redo discard that runtime and reconstruct it from Blender recovery
 data before another click.

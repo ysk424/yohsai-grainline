@@ -52,7 +52,7 @@ reference silhouettes do not participate and are safe to keep on the page.
 PDF line and cubic Bezier path operators are retained. The current parser
 requires an explicit `h` close-path operation; close-and-paint and implicit fill
 closure are not yet promoted to closed panels. Text annotations use `#`, `@W`,
-and single-letter sewing syntax. The
+`@M`, `@TUBE`, `@TOP`, `RING`, and single-letter sewing syntax. The
 initial Illustrator compatibility profile also decodes its embedded
 Identity-H ASCII font convention when a ToUnicode map is absent.
 
@@ -117,7 +117,7 @@ ASCII-only labels are the contract. Version 0.2.6 has a known Python
 case-insensitive-regex gap that may accept a small set of Unicode case-folding
 characters. Those accidental spellings are unsupported and must not be used.
 
-### 6.4 Mirror and RING construction
+### 6.4 Mirror, RING, and TUBE construction
 
 `@M` and `@TOP` belong to the one labeled panel containing their text origin.
 `@M` creates two instances at Load: the authored geometry is LEFT and its
@@ -129,6 +129,15 @@ required on that panel and selects the circumferential location that maps to
 maximum world Z after Load wraps and welds the panel into a tube. RING cannot
 share a segment with `@W` or a sewing letter, and RING construction cannot be
 combined with fold expansion on the same panel.
+
+`@TUBE` belongs to the one labeled panel containing its text origin. Version 1
+requires exactly two `@TUBE` panels, rejects duplicates, and cannot combine it
+with `@M` or RING on the same panel. `@TUBE` is an opt-in Sewing-time placement
+command; it does not change flat pattern coordinates, material rest lengths, or
+panel identity. The mesh-level topology check in section 11 selects exactly two
+paired open sewing paths that span at least half of both panels' page-warp
+extent. Short shoulder seams and other construction seams remain ordinary
+sewing constraints.
 
 ## 7. Panel and segment identity
 
@@ -177,6 +186,7 @@ true`, and an ordered `segments` array. A labeled panel begins:
   "closed": true,
   "mirror": false,
   "top": null,
+  "tube": false,
   "segments": []
 }
 ```
@@ -354,13 +364,32 @@ kept in the same collection but hidden in the viewport and render. No Cloth
 modifier is added in this step. Repeating `Sewing` for a collection that already
 contains a sewn mesh is an error.
 
+For two `@TUBE` panels, Sewing additionally requires a selected mesh Body and a
+usable world-space placement of the source panels. The two long path pairs form
+shared longitudinal rail curves parameterized by normalized authored length.
+The panels map to opposing circular arches between those rails; geometry beyond
+a rail endpoint continues along the page-warp tangent rather than collapsing
+onto the endpoint. The Body center selects the first outward side and the other
+panel bows oppositely.
+
+The construction family starts with a flat candidate and then reduces effective
+radius in 10 mm increments. Every candidate is generated directly and checked
+against one evaluated Body BVH. The first contact and preceding clear candidate
+are refined four times. At most 99 candidates are evaluated, and the retained
+preview is the clear side of the 5 mm contact boundary. Missing Body, ambiguous
+or non-long rails, excessive width mismatch, a flat candidate already in
+contact, or failure to find a contact bracket cancels Sewing before any source
+object is hidden or modified.
+
 ## 12. Kitsuke
 
 The combined `Sewing` object is a visual verification and connectivity record,
 not the persistent editing representation. On the first `Kitsuke`, Yohsai reads
-its loose sewing edges, snapshots the evaluated Body, and creates a transient
-Taichi simulation containing all source panels. Later clicks reuse that live
-runtime. The pattern edge lengths remain the stretch rest lengths, paired seam
+its loose sewing edges and verified preview positions, snapshots the evaluated
+Body, and creates a transient simulation containing all source panels. An
+`@TUBE` preview also initializes its non-flat Cosserat director frame; flat
+pattern coordinates remain the material rest state. Later clicks reuse that
+live runtime. The pattern edge lengths remain the stretch rest lengths, paired seam
 vertices progressively approach zero distance, and body and self contact use a
 0.002 m thickness.
 
@@ -425,7 +454,7 @@ error, or transfer failure cancels the whole operation without modifying the
 existing garment.
 
 The sewing signature contains normalized sewing labels, panel/segment
-membership, mirror flags, TOP coordinates, and RING segment indices, but not
+membership, mirror and TUBE flags, TOP coordinates, and RING segment indices, but not
 ordinary geometry coordinates. An unchanged signature preserves the verified
 Sewing state and permits direct Kitsuke. A changed signature clears verification;
 Kitsuke refuses with `Sewing required` until Sewing succeeds.

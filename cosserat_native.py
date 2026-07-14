@@ -10,7 +10,9 @@ from pathlib import Path
 import numpy as np
 
 
-API_VERSION = 2
+API_VERSION = 4
+INTERNAL_SELF_COLLISION = -1
+INEXTENSIBLE_EXTENSION_COMPLIANCE = 0.0
 _ERROR_CAPACITY = 1024
 
 
@@ -27,7 +29,8 @@ class _Config(ctypes.Structure):
         ("time_step", ctypes.c_float),
         ("substeps", ctypes.c_int32),
         ("iterations", ctypes.c_int32),
-        ("stretch_stiffness", ctypes.c_float),
+        ("director_alignment_stiffness", ctypes.c_float),
+        ("extension_compliance", ctypes.c_float),
         ("bend_stiffness", ctypes.c_float),
         ("quad_shear_stiffness", ctypes.c_float),
         ("quad_area_stiffness", ctypes.c_float),
@@ -58,6 +61,8 @@ class _CreateDesc(ctypes.Structure):
         ("seams", IntPointer),
         ("face_count", ctypes.c_int32),
         ("faces", IntPointer),
+        ("collision_edge_count", ctypes.c_int32),
+        ("collision_edges", IntPointer),
         ("body_vertex_count", ctypes.c_int32),
         ("body_positions", FloatPointer),
         ("body_face_count", ctypes.c_int32),
@@ -86,6 +91,8 @@ class _Stats(ctypes.Structure):
         ("quad_count", ctypes.c_int32),
         ("body_candidate_count", ctypes.c_int32),
         ("self_candidate_count", ctypes.c_int32),
+        ("self_broad_phase_rebuilds", ctypes.c_int32),
+        ("self_candidate_tests", ctypes.c_int64),
         ("maximum_displacement", ctypes.c_float),
         ("maximum_edge_strain", ctypes.c_float),
         ("stretch_energy", ctypes.c_float),
@@ -265,8 +272,11 @@ class NativeCosseratRuntime:
         quads,
         seams,
         faces,
+        collision_edges,
         body,
         locked,
+        *,
+        extension_compliance: float = INEXTENSIBLE_EXTENSION_COMPLIANCE,
     ):
         self._library = _get_library()
         self._handle = ctypes.c_void_p()
@@ -286,6 +296,7 @@ class NativeCosseratRuntime:
         quads_array = _int_array(quads, 4, "quads")
         seams_array = _int_array(seams, 2, "seams")
         faces_array = _int_array(faces, 3, "faces")
+        collision_edges_array = _int_array(collision_edges, 2, "collision edges")
         body_vertices = _float_array(body.vertices, (len(body.vertices), 3), "Body vertices")
         body_faces = _int_array(body.faces, 3, "Body faces")
         locked_array = np.ascontiguousarray(locked, dtype=np.int32)
@@ -296,6 +307,7 @@ class NativeCosseratRuntime:
         config = _Config()
         if self._library.ysc_default_config(ctypes.byref(config)) != 0:
             raise NativeCosseratError("Native solver did not provide a default configuration.")
+        config.extension_compliance = float(extension_compliance)
 
         desc = _CreateDesc(
             self.vertex_count,
@@ -314,6 +326,8 @@ class NativeCosseratRuntime:
             _int_pointer(seams_array),
             len(faces_array),
             _int_pointer(faces_array),
+            len(collision_edges_array),
+            _int_pointer(collision_edges_array),
             len(body_vertices),
             _float_pointer(body_vertices),
             len(body_faces),
@@ -421,14 +435,19 @@ class NativeCosseratRuntime:
         solver_iterations: int,
     ) -> None:
         body = _candidate_array(body_candidates, "Body candidates")
-        self_contact = _candidate_array(self_candidates, "self-contact candidates")
+        internal_self_collision = self_candidates is None
+        self_contact = (
+            np.empty((0, 2), dtype=np.int32)
+            if internal_self_collision
+            else _candidate_array(self_candidates, "self-contact candidates")
+        )
         desc = _AdvanceDesc(
             (ctypes.c_float * 3)(0.0, 0.0, -float(gravity_magnitude)),
             float(seam_closure),
             int(solver_iterations),
             len(body),
             _int_pointer(body),
-            len(self_contact),
+            INTERNAL_SELF_COLLISION if internal_self_collision else len(self_contact),
             _int_pointer(self_contact),
         )
         stats = _Stats()

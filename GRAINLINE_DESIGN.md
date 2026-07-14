@@ -1,7 +1,7 @@
 # Yohsai Grainline Design
 
-Status: v0.5.0 grain-aligned quad-lattice milestone implemented and
-integration-tested
+Status: v0.5.3 owner-accepted @TUBE workflow on the v0.5.2 inextensible
+extension path; broader clothing simulation remains experimental
 Recorded: 2026-07-14 (Asia/Tokyo)
 
 ## 1. Authoritative garment convention
@@ -77,7 +77,7 @@ Self-contact exclusions use every proxy-topology edge, including the diagonal,
 so adjacent triangles cannot repel one another merely because that diagonal is
 not a rod.
 
-The fixed `test2.pdf` fixture contains 16,948 vertices, 33,018 proxy triangles,
+The v0.5.0 `test2.pdf` fixture contained 16,948 vertices, 33,018 proxy triangles,
 15,102 quads, 15,626 warp edges, 15,365 weft edges, 3,871 transition edges, and
 448 sewing constraints. Its linear pitch is still 5 mm. The former staggered
 triangular lattice had 19,454 vertices at the same pitch because its area per
@@ -106,8 +106,9 @@ For local corner `i`, the coefficients of `u` are
 `(-0.5, -0.5, 0.5, 0.5)`. Each position sweep adds the corresponding shear and
 area energy gradients and positive Gauss-Newton scalar Hessians to the existing
 vertex-block VBD update. Both default stiffness densities are `2.0e5`; each
-cell's effective weight is multiplied by its rest area. Structural segment
-stretch remains `2.0e6`, and Stable Cosserat bending remains `2.0e-4`.
+cell's effective weight is multiplied by its rest area. Stable Cosserat
+director alignment remains `2.0e6`, bending remains `2.0e-4`, and axial
+extension is now controlled separately by `extension_compliance`.
 
 Proxy diagonals contribute neither stretch rods nor Cosserat orientations. The
 warp/weft/transition segments continue to use the Stable Cosserat closed-form
@@ -117,10 +118,14 @@ direction from complete interior cells.
 
 ## 6. Native and Blender state boundary
 
-The native C ABI is version 2. Its create descriptor adds flat material rest
-positions and ordered quad connectivity; configuration adds shear and area
-stiffness; counts and statistics expose quad count plus shear and area energy.
-The rendering faces remain triangles for Blender and collision.
+The native C ABI is version 4. Version 2 introduced flat material rest
+positions, ordered quad connectivity, shear/area stiffness, and corresponding
+counts and energy statistics. Version 3 adds the complete collision-proxy edge
+set to the create descriptor, an internal-self-collision sentinel on advance,
+and broad-phase rebuild/candidate-test statistics. Version 4 replaces the
+coupled `stretch_stiffness` field with `director_alignment_stiffness` and
+`extension_compliance`. The rendering faces remain triangles for Blender and
+collision.
 
 Only structural edge quaternions cross the native boundary and participate in
 Undo recovery. Their values are stored in the existing edge-domain quaternion
@@ -151,19 +156,21 @@ The implemented milestone passed:
 
 On the development machine, the density-only Load/Sewing fixture took 4.878 s
 and the broad source integration suite took 288.065 s. These are regression
-observations, not cross-machine performance guarantees. The native material
-solver is still single-threaded.
+observations, not cross-machine performance guarantees. At the 0.5.0 milestone,
+the native material and contact solver was still single-threaded.
 
 ## 8. Deliberate limits
 
 - Clipped boundary cells are not generalized quads; they stay in the
   grain-preserving triangular transition strip.
 - The area constraint uses magnitude and is not by itself an inversion barrier.
-- Contact remains the accepted discrete point-triangle implementation; this
-  milestone does not claim CCD or IPC.
+- Contact remains the accepted discrete point-triangle implementation. Native
+  neighbor lists are refreshed from measured motion, but this milestone does
+  not claim CCD or IPC.
 - Legacy Taichi remains available for recovery and comparison, but it does not
   implement the new native quad shear/area energies.
-- Parallel VBD coloring, SIMD, and GPU execution are future performance work.
+- Parallel material VBD coloring, SIMD, and GPU execution remain future
+  performance work; self-contact broad/narrow phase is already CPU-parallel.
 
 ## 9. Triangular versus grainline cost record
 
@@ -217,9 +224,10 @@ The main grainline optimization opportunities are:
    accumulation and reduction (two-color checkerboarding is insufficient
    because diagonal vertices share a quad);
 5. parallelize warp and weft orientation chains independently and apply SIMD;
-6. move or parallelize the Python collision broad phase, which is outside the
-   fast native microbenchmark and benefits directly from 13% fewer proxy
-   vertices/faces.
+6. move or parallelize the Python collision broad phase. Version 0.5.1
+   completes this for cloth self-contact by moving its spatial hash, exact AABB
+   filter, and candidate evaluation into native OpenMP code. Body broad phase
+   remains on the host and is not currently the dominant cost.
 
 The triangular solver also remains parallelizable and has the simpler local
 constraint, so the square representation is not automatically faster at equal
@@ -227,3 +235,82 @@ vertex count. Its principal advantage is material correctness and a regular
 warp/weft structure; its current speed advantage at equal 5 mm pitch is real
 but modest. Keeping `yohsai-cosserat` as the unchanged triangular baseline
 provides the appropriate A/B reference while this decision is evaluated.
+
+## 10. v0.5.1 performance plan and acceptance record
+
+The first optimization phase addresses the measured dominant cost rather than
+changing the accepted cloth model. The implementation is:
+
+1. a native triangle spatial hash with 20 mm cells;
+2. 10 mm padded triangle AABBs, comprising 5 mm contact thickness plus a 5 mm
+   neighbor-list skin;
+3. deterministic rebuild when any vertex moves more than 2.5 mm from the last
+   build position;
+4. structural, proxy-topology, face-edge, and seam exclusions prepared once;
+5. reusable per-vertex candidate vectors flattened into deterministic CSR;
+6. OpenMP vertex-parallel lookup, AABB filtering, and contact evaluation with
+   fixed face order, per-vertex accumulation, and no floating-point atomics;
+7. reusable Body, self-contact, and seam correction buffers.
+
+On the fixed `test2.pdf` first-click state, the neighbor list was rebuilt 42
+times. Its largest list contained 678,499 point-face pairs and the nonlinear
+solve performed 71,752,885 candidate tests. Native advance time fell from the
+0.5.0 record of 8.483 s to 1.370 s (6.19x), while the complete session advance
+fell from 10.231 s to 1.596 s (6.41x). One, eight, sixteen, and the default 32
+logical threads measured 3.996 s, 1.795 s, 1.546 s, and 1.370 s respectively.
+All reported physical statistics were identical across those thread-count
+runs. The production-fixture determinism check also produced the same SHA-256
+hash of positions, velocities, orientations, and seam state with one and 32
+threads. These figures are machine-local regression observations.
+
+The complete source Load/Sewing/ten-click Kitsuke/Update suite took 106.0 s,
+compared with the 0.5.0 record of 288.065 s (2.72x). The packaged and installed
+0.5.1 build repeated the suite in 105.3 s. Native/Python unit tests, exact mesh
+density and grain axes, mirrored RING sleeve construction, and exact
+Undo/Redo/replay all pass.
+
+The retained optimization plan is phased so that each stage keeps a CPU
+fallback and is accepted by exact Undo/replay and penetration regression tests:
+
+- deferred CPU material phase: store direct `(quad, corner)` incidence, replace
+  vector-of-vectors adjacency with compact CSR/SoA, precompute reusable quad
+  terms, use four-color position sweeps, and color independent orientation
+  work;
+- subsequent CPU refinement: profile-guided SIMD, allocation removal, and only
+  then parallelize the remaining host Body broad phase if it is material;
+- v0.6 experimental CUDA phase: keep simulation state resident on the GPU,
+  implement broad phase, narrow phase, and material solve together, use CUDA
+  Graphs to reduce launch overhead, and preserve the deterministic CPU/OpenMP
+  backend as the supported fallback.
+
+A third-party simulation library is not the preferred next step: replacing the
+solver would risk the validated grainline material semantics, progressive seam
+policy, Lock behavior, and exact Blender Undo state. Small infrastructure
+libraries may still be adopted when their license, deterministic behavior, and
+measured benefit are clear.
+
+## 11. v0.5.2 extension-compliance experiment
+
+Material mathematics was deliberately moved ahead of the retained CPU
+data-layout phase. Version 0.5.2 separates the former coupled segment term into
+Cosserat director alignment and axial extension. The new native value
+`extension_compliance` is inverse axial rigidity `1/(EA)`. A positive value
+uses an elastic extension energy; exactly zero asks for every structural edge
+to retain its authored rest length through a simultaneous mass-weighted
+constraint projection.
+
+The production test is fixed to zero in `kitsuke.py`; there is no UI or
+PDF/JSON material lookup. `_lawn60` identifies the first thin woven-cotton test
+and `_jersey` is reserved for the later extensible comparison. The complete
+contract, formula, tests, rollback rule, and known convergence failure are in
+`FABRIC_EXTENSION_DESIGN.md`.
+
+The revised `test2.pdf` density check passes with 19,692 vertices, 38,468 proxy
+triangles, 17,767 material quads, 18,302 warp segments, 18,014 weft segments,
+4,075 transition segments, and 448 sewing springs. Native and Python small
+constraint tests also pass. The full first Kitsuke click is not accepted: after
+320 nonlinear projection updates, its maximum relative structural-edge strain
+is still 0.080050 with a distant Body, so native advance throws and Blender
+state is restored. This incomplete result supersedes the former plan to call
+v0.5.2 a CPU-coloring release. Convergence diagnosis now precedes `_jersey`
+parameter selection and renewed performance work.

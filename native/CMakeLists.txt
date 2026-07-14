@@ -5,6 +5,27 @@ add_library(yohsai_cosserat SHARED
     src/solver.cpp
 )
 
+find_package(OpenMP REQUIRED COMPONENTS CXX)
+
+if(MSVC)
+    # MSVC OpenMP links VCOMP140.DLL dynamically. Install the licensed x64
+    # redistributable beside the solver so a portable Blender installation
+    # does not depend on an unrelated system-wide VC runtime installation.
+    set(CMAKE_INSTALL_OPENMP_LIBRARIES TRUE)
+    set(CMAKE_INSTALL_SYSTEM_RUNTIME_LIBS_SKIP TRUE)
+    include(InstallRequiredSystemLibraries)
+    set(YSC_OPENMP_RUNTIME_LIBS "")
+    foreach(runtime_library IN LISTS CMAKE_INSTALL_SYSTEM_RUNTIME_LIBS)
+        if(runtime_library MATCHES "[/\\\\]vcomp140\\.dll$")
+            list(APPEND YSC_OPENMP_RUNTIME_LIBS "${runtime_library}")
+        endif()
+    endforeach()
+    if(NOT YSC_OPENMP_RUNTIME_LIBS)
+        message(FATAL_ERROR "MSVC OpenMP runtime vcomp140.dll was not found")
+    endif()
+    install(PROGRAMS ${YSC_OPENMP_RUNTIME_LIBS} DESTINATION bin)
+endif()
+
 target_include_directories(yohsai_cosserat
     PUBLIC
         ${CMAKE_CURRENT_SOURCE_DIR}/include
@@ -14,6 +35,7 @@ target_include_directories(yohsai_cosserat
 
 target_compile_features(yohsai_cosserat PUBLIC cxx_std_20)
 target_compile_definitions(yohsai_cosserat PRIVATE YSC_BUILD_DLL)
+target_link_libraries(yohsai_cosserat PRIVATE OpenMP::OpenMP_CXX)
 
 if(MSVC)
     target_compile_options(yohsai_cosserat PRIVATE /W4 /permissive- /EHsc)

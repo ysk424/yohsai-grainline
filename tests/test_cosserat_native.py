@@ -13,7 +13,12 @@ import cosserat_native
 
 @unittest.skipUnless(cosserat_native.native_library_available(), "Stable Cosserat DLL is not built")
 class NativeCosseratBridgeTests(unittest.TestCase):
-    def runtime(self, locked=(0, 0, 0)):
+    def runtime(
+        self,
+        locked=(0, 0, 0),
+        *,
+        extension_compliance=cosserat_native.INEXTENSIBLE_EXTENSION_COMPLIANCE,
+    ):
         positions = np.asarray(((0, 0, 0), (1, 0, 0), (2, 0, 0)), dtype=np.float32)
         edges = np.asarray(((0, 1), (1, 2)), dtype=np.int32)
         body = SimpleNamespace(
@@ -30,8 +35,10 @@ class NativeCosseratBridgeTests(unittest.TestCase):
             np.empty((0, 4), dtype=np.int32),
             np.empty((0, 2), dtype=np.int32),
             np.empty((0, 3), dtype=np.int32),
+            edges,
             body,
             np.asarray(locked, dtype=np.int32),
+            extension_compliance=extension_compliance,
         )
 
     def test_counts_state_and_unit_orientations(self):
@@ -75,6 +82,24 @@ class NativeCosseratBridgeTests(unittest.TestCase):
         finally:
             runtime.close()
 
+    def test_zero_extension_compliance_preserves_edge_lengths(self):
+        runtime = self.runtime((1, 0, 0), extension_compliance=0.0)
+        try:
+            for _click in range(10):
+                runtime.advance(
+                    np.empty((0, 2), dtype=np.int32),
+                    np.empty((0, 2), dtype=np.int32),
+                    100.0,
+                    0.0,
+                    4,
+                )
+            positions, _velocities = runtime.state()
+            lengths = np.linalg.norm(positions[1:] - positions[:-1], axis=1)
+            np.testing.assert_allclose(lengths, 1.0, rtol=0.0, atol=1.0e-5)
+            self.assertLess(float(runtime.last_stats["maximum_edge_strain"]), 1.0e-5)
+        finally:
+            runtime.close()
+
     def test_quad_connectivity_and_energy_stats_cross_the_abi(self):
         positions = np.asarray(
             ((0, 0, 0), (1, 0, 0), (1, 0, 1), (0, 0, 1)), dtype=np.float32
@@ -94,6 +119,7 @@ class NativeCosseratBridgeTests(unittest.TestCase):
             np.asarray(((0, 1, 2, 3),), dtype=np.int32),
             np.empty((0, 2), dtype=np.int32),
             np.asarray(((0, 1, 2), (0, 2, 3)), dtype=np.int32),
+            np.asarray(((0, 1), (1, 2), (2, 3), (3, 0), (0, 2)), dtype=np.int32),
             body,
             np.zeros(4, dtype=np.int32),
         )
@@ -109,6 +135,50 @@ class NativeCosseratBridgeTests(unittest.TestCase):
             self.assertEqual(runtime.last_stats["quad_count"], 1)
             self.assertLess(abs(float(runtime.last_stats["shear_energy"])), 1.0e-6)
             self.assertLess(abs(float(runtime.last_stats["area_energy"])), 1.0e-6)
+        finally:
+            runtime.close()
+
+    def test_native_self_collision_mode_crosses_the_abi(self):
+        positions = np.asarray(
+            (
+                (0.0, 0.0, 0.0),
+                (0.01, 0.0, 0.0),
+                (0.0, 0.01, 0.0),
+                (0.0025, 0.0025, 0.001),
+                (0.0025, 0.0025, 0.101),
+            ),
+            dtype=np.float32,
+        )
+        edges = np.asarray(((3, 4),), dtype=np.int32)
+        body = SimpleNamespace(
+            vertices=np.empty((0, 3), dtype=np.float32),
+            faces=np.empty((0, 3), dtype=np.int32),
+        )
+        runtime = cosserat_native.NativeCosseratRuntime(
+            positions,
+            np.zeros_like(positions),
+            positions,
+            positions,
+            edges,
+            np.asarray((0.1,), dtype=np.float32),
+            np.empty((0, 4), dtype=np.int32),
+            np.empty((0, 2), dtype=np.int32),
+            np.asarray(((0, 1, 2),), dtype=np.int32),
+            np.asarray(((0, 1), (1, 2), (2, 0), (3, 4)), dtype=np.int32),
+            body,
+            np.asarray((1, 1, 1, 0, 1), dtype=np.int32),
+        )
+        try:
+            runtime.advance(
+                np.empty((0, 2), dtype=np.int32),
+                None,
+                0.0,
+                0.0,
+                1,
+            )
+            self.assertGreater(int(runtime.last_stats["self_candidate_count"]), 0)
+            self.assertEqual(int(runtime.last_stats["self_broad_phase_rebuilds"]), 1)
+            self.assertGreater(int(runtime.last_stats["self_candidate_tests"]), 0)
         finally:
             runtime.close()
 

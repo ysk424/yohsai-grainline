@@ -121,15 +121,15 @@ try:
     elapsed = time.perf_counter() - started
 
     assert mesh_loader.MESH_SPACING_M == 0.005
-    assert vertices == 16_948, (vertices, faces, quad_count, grid_cell_count, family_counts)
-    assert faces == 33_018, (vertices, faces, quad_count, grid_cell_count, family_counts)
-    assert quad_count == 15_102
-    assert grid_cell_count == 15_348
+    assert vertices == 19_692, (vertices, faces, quad_count, grid_cell_count, family_counts)
+    assert faces == 38_468, (vertices, faces, quad_count, grid_cell_count, family_counts)
+    assert quad_count == 17_767
+    assert grid_cell_count == 18_032
     assert quad_count / grid_cell_count > 0.98
     assert family_counts[mesh_loader.GRAINLINE_EDGE_PROXY] == quad_count
-    assert family_counts[mesh_loader.GRAINLINE_EDGE_WARP] == 15_626
-    assert family_counts[mesh_loader.GRAINLINE_EDGE_WEFT] == 15_365
-    assert family_counts[mesh_loader.GRAINLINE_EDGE_TRANSITION] == 3_871
+    assert family_counts[mesh_loader.GRAINLINE_EDGE_WARP] == 18_302
+    assert family_counts[mesh_loader.GRAINLINE_EDGE_WEFT] == 18_014
+    assert family_counts[mesh_loader.GRAINLINE_EDGE_TRANSITION] == 4_075
     print(
         "YOHSAI_DENSITY_OK",
         f"parts={len(parts)}",
