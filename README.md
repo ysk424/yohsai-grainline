@@ -3,6 +3,14 @@
 Yohsai is a public, in-development Blender extension for clothing construction.
 The API, data shape, and generated output are still experimental.
 
+This repository is the `yohsai-grainline` research continuation of the
+validated Stable Cosserat implementation. Its next solver keeps the pattern
+paper's vertical direction as warp and replaces the internal triangular rod
+network with a grain-aligned square lattice while retaining a triangulated
+Blender and collision proxy. The fixed material convention and fork boundary
+are recorded in `GRAINLINE_DESIGN.md`. Until that milestone is implemented, the
+current code remains the tested v0.4.1 triangular baseline.
+
 The Illustrator pattern is authoritative; Blender meshes are replaceable
 physical realizations of that pattern. The normal Yohsai workflow is
 intentionally concentrated into four operations:

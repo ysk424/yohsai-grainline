@@ -8,6 +8,8 @@ The authoritative Kitsuke design, tuning log, known limitations, and resume
 checklist are maintained in `KITSUKE_DESIGN.md`.
 The v0.4 native Stable Cosserat backend and its acceptance record are maintained
 in `COSSERAT_DESIGN.md`; `KITSUKE_DESIGN.md` retains the legacy Taichi baseline.
+The grain-aligned square-lattice fork contract is maintained in
+`GRAINLINE_DESIGN.md`.
 The product-level pattern-designer perspective and anti-drift rules are
 authoritative in `DESIGN_PHILOSOPHY.md`.
 The latest tested handoff, deferred issues, release procedure, and next priority
