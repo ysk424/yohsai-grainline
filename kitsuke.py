@@ -26,23 +26,14 @@ from .mesh_loader import (
 )
 
 
-TIME_STEP = 1.0 / 240.0
 STEPS_PER_CLICK = 8
 SOLVER_ITERATIONS = 20
 MIN_SOLVER_ITERATIONS = 1
 MAX_SOLVER_ITERATIONS = 128
-CONTACT_THICKNESS_M = 0.005
-CONTACT_CORRECTION_MAX_M = 0.0002
 COLLISION_SEARCH_M = 0.04
 ZERO_GRAVITY_M_PER_SECOND_SQUARED = 0.0
 NORMAL_GRAVITY_M_PER_SECOND_SQUARED = 9.81
-SEAM_ATTRACTION_FORCE = 300.0
-SEAM_CAPTURE_DISTANCE_M = 0.002
-STRETCH_RELAXATION = 1.0
-SHEAR_RELAXATION = 0.02
-BEND_RELAXATION = 0.0001
 KITSUKE_BACKEND_STABLE_COSSERAT = "STABLE_COSSERAT"
-KITSUKE_BACKEND_TAICHI = "TAICHI"
 DEFAULT_KITSUKE_BACKEND = KITSUKE_BACKEND_STABLE_COSSERAT
 KITSUKE_BACKENDS = frozenset((KITSUKE_BACKEND_STABLE_COSSERAT,))
 
@@ -88,8 +79,6 @@ class _ClothTopology:
 
 
 _sessions: dict[int, "_KitsukeSession"] = {}
-_taichi = None
-_runtime_type = None
 
 
 def _matrix_tuple(matrix: Matrix) -> tuple[float, ...]:
@@ -168,9 +157,9 @@ def _read_persisted_seams(collection: bpy.types.Collection, vertex_count: int) -
     try:
         values = np.asarray(collection[_STATE_SEAMS_KEY], dtype=np.int32)
     except (KeyError, TypeError, ValueError) as exc:
-        raise KitsukeError("The stored Kitsuke sewing pairs are incomplete. Run Sewing again.") from exc
+        raise KitsukeError("The stored GRAVITY sewing pairs are incomplete; press GRAVITY again to rebuild them.") from exc
     if not len(values) or len(values) % 2:
-        raise KitsukeError("The stored Kitsuke sewing pairs are invalid. Run Sewing again.")
+        raise KitsukeError("The stored GRAVITY sewing pairs are invalid; press GRAVITY again to rebuild them.")
     seams = values.reshape((-1, 2))
     if np.any(seams < 0) or np.any(seams >= vertex_count) or np.any(seams[:, 0] == seams[:, 1]):
         raise KitsukeError("The stored Kitsuke sewing pairs no longer match the panel vertices.")
@@ -382,20 +371,20 @@ def _seam_constraints(preview: bpy.types.Object, part_ranges: list[_PartRange]) 
 
 def _seam_constraints_from_parts(collection: bpy.types.Collection, part_ranges: list[_PartRange]) -> np.ndarray:
     if not bool(collection.get("yohsai_sewing_verified", False)):
-        raise KitsukeError("Sewing required: verify the current pattern connectivity before Kitsuke.")
+        raise KitsukeError("Automatic Sewing is required before GRAVITY can advance.")
     try:
         plan = build_sewing_plan(collection)
     except SewingError as exc:
-        raise KitsukeError(f"Sewing required: {exc}") from exc
+        raise KitsukeError(f"Automatic Sewing failed: {exc}") from exc
     expected = [part.obj.name for part in part_ranges]
     if [part.name for part in plan.parts] != expected:
-        raise KitsukeError("Sewing required: the verified panel set no longer matches the current objects.")
+        raise KitsukeError("Automatic Sewing failed: the verified panel set no longer matches the current objects.")
     return np.asarray([(a, b) for _label, a, b in plan.connections], dtype=np.int32).reshape((-1, 2))
 
 
 def _body_snapshot(context, body: bpy.types.Object) -> _BodySnapshot:
     if body is None:
-        raise KitsukeError("Select a mesh Body before using Kitsuke.")
+        raise KitsukeError("Select a mesh Body before pressing GRAVITY.")
     if body.type != "MESH":
         raise KitsukeError(
             f"Body '{body.name}' is {body.type}, not MESH. Select the character's actual skin mesh."
@@ -456,33 +445,6 @@ def _inside_body(body: _BodySnapshot, point: np.ndarray) -> bool:
     return odd_votes >= 2
 
 
-def _project_body_penetrations(
-    body: _BodySnapshot,
-    positions: np.ndarray,
-    velocities: np.ndarray,
-    locked: np.ndarray,
-) -> bool:
-    changed = False
-    for index, point in enumerate(positions):
-        if locked[index]:
-            continue
-        if not _inside_body(body, point):
-            continue
-        location, _normal, face_index, _distance = body.bvh.find_nearest(
-            Vector(tuple(float(value) for value in point))
-        )
-        if face_index is None or location is None:
-            continue
-        direction = location - Vector(tuple(float(value) for value in point))
-        if direction.length_squared <= 1.0e-16:
-            continue
-        projected = location + direction.normalized() * CONTACT_THICKNESS_M
-        positions[index] = projected
-        velocities[index] = 0.0
-        changed = True
-    return changed
-
-
 def _body_collision_candidates(positions: np.ndarray, body: _BodySnapshot) -> np.ndarray:
     """Return the nearest Body triangle for nearby or penetrating cloth vertices."""
     pairs: list[tuple[int, int]] = []
@@ -508,368 +470,12 @@ def _unlocked_body_collision_candidates(positions: np.ndarray, body: _BodySnapsh
     return pairs[locked[pairs[:, 0]] == 0]
 
 
-def _ensure_taichi():
-    global _taichi, _runtime_type
-    if _taichi is not None:
-        return _taichi, _runtime_type
-    try:
-        import taichi as ti
-    except ImportError as exc:
-        raise KitsukeError(
-            "Taichi is not installed for this Blender build. Reinstall the complete Yohsai package with its platform wheel."
-        ) from exc
-    try:
-        ti.init(arch=ti.gpu, default_fp=ti.f32, fast_math=True, offline_cache=True)
-    except Exception:
-        try:
-            ti.reset()
-            ti.init(arch=ti.cpu, default_fp=ti.f32, fast_math=True, offline_cache=True)
-        except Exception as exc:
-            raise KitsukeError(f"Taichi could not initialize an automatic GPU or CPU backend: {exc}") from exc
-    _taichi = ti
-    _runtime_type = _create_runtime_type(ti)
-    return _taichi, _runtime_type
-
-
-def _create_runtime_type(ti):
-    @ti.data_oriented
-    class _TaichiRuntime:
-        def __init__(self, positions, velocities, seams, topology, body, locked):
-            self.vertex_count = len(positions)
-            self.edge_count = len(topology.edges)
-            self.quad_count = len(topology.quads)
-            self.bend_count = len(topology.bends)
-            self.x = ti.Vector.field(3, dtype=ti.f32, shape=self.vertex_count)
-            self.previous = ti.Vector.field(3, dtype=ti.f32, shape=self.vertex_count)
-            self.velocity = ti.Vector.field(3, dtype=ti.f32, shape=self.vertex_count)
-            self.locked = ti.field(dtype=ti.i32, shape=self.vertex_count)
-            self.delta = ti.Vector.field(3, dtype=ti.f32, shape=self.vertex_count)
-            self.count = ti.field(dtype=ti.i32, shape=self.vertex_count)
-            self.seams = ti.Vector.field(2, dtype=ti.i32, shape=len(seams))
-            self.seam_rest = ti.field(dtype=ti.f32, shape=len(seams))
-            self.seam_captured = ti.field(dtype=ti.i32, shape=len(seams))
-            self.edges = ti.Vector.field(2, dtype=ti.i32, shape=max(1, self.edge_count))
-            self.edge_rest = ti.field(dtype=ti.f32, shape=max(1, self.edge_count))
-            self.quads = ti.Vector.field(4, dtype=ti.i32, shape=max(1, self.quad_count))
-            self.quad_rest = ti.Vector.field(3, dtype=ti.f32, shape=max(1, self.quad_count))
-            self.bends = ti.Vector.field(3, dtype=ti.i32, shape=max(1, self.bend_count))
-            self.bend_rest = ti.Vector.field(2, dtype=ti.f32, shape=max(1, self.bend_count))
-            self.body_x = ti.Vector.field(3, dtype=ti.f32, shape=len(body.vertices))
-            self.body_faces = ti.Vector.field(3, dtype=ti.i32, shape=len(body.faces))
-            self.x.from_numpy(positions)
-            self.velocity.from_numpy(velocities)
-            self.locked.from_numpy(locked)
-            self.seams.from_numpy(seams)
-            seam_rest = np.zeros(len(seams), dtype=np.float32)
-            self.seam_rest.from_numpy(seam_rest)
-            seam_distances = np.linalg.norm(
-                positions[seams[:, 1]] - positions[seams[:, 0]], axis=1
-            )
-            self.seam_captured.from_numpy(
-                (seam_distances <= SEAM_CAPTURE_DISTANCE_M).astype(np.int32)
-            )
-            if self.edge_count:
-                self.edges.from_numpy(topology.edges)
-                self.edge_rest.from_numpy(topology.edge_rest_lengths)
-            if self.quad_count:
-                self.quads.from_numpy(topology.quads)
-                self.quad_rest.from_numpy(topology.quad_rest_metrics)
-            if self.bend_count:
-                self.bends.from_numpy(topology.bends)
-                self.bend_rest.from_numpy(topology.bend_rest_lengths)
-            self.body_x.from_numpy(body.vertices)
-            self.body_faces.from_numpy(body.faces)
-
-        @ti.kernel
-        def replace_state(
-            self,
-            positions: ti.types.ndarray(dtype=ti.f32, ndim=2),
-            velocities: ti.types.ndarray(dtype=ti.f32, ndim=2),
-            locked: ti.types.ndarray(dtype=ti.i32, ndim=1),
-        ):
-            for index in range(self.vertex_count):
-                self.x[index] = ti.Vector([positions[index, 0], positions[index, 1], positions[index, 2]])
-                self.velocity[index] = ti.Vector([velocities[index, 0], velocities[index, 1], velocities[index, 2]])
-                self.locked[index] = locked[index]
-
-        @ti.kernel
-        def integrate(self, dt: ti.f32, gravity_magnitude: ti.f32):
-            gravity = ti.Vector([0.0, 0.0, -gravity_magnitude])
-            for index in range(self.vertex_count):
-                self.previous[index] = self.x[index]
-                if self.locked[index] == 0:
-                    self.velocity[index] += gravity * dt
-                    self.x[index] += self.velocity[index] * dt
-                else:
-                    self.velocity[index] = ti.Vector.zero(ti.f32, 3)
-
-        @ti.kernel
-        def clear_corrections(self):
-            for index in range(self.vertex_count):
-                self.delta[index] = ti.Vector.zero(ti.f32, 3)
-                self.count[index] = 0
-
-        @ti.func
-        def add_distance_correction(self, a: ti.i32, b: ti.i32, target_length: ti.f32, relaxation: ti.f32):
-            difference = self.x[b] - self.x[a]
-            length = difference.norm()
-            if length > 1.0e-8:
-                free_a = 1 if self.locked[a] == 0 else 0
-                free_b = 1 if self.locked[b] == 0 else 0
-                weight = free_a + free_b
-                correction = difference * (relaxation * (length - target_length) / (length * ti.max(1, weight)))
-                if free_a:
-                    for axis in ti.static(range(3)):
-                        ti.atomic_add(self.delta[a][axis], correction[axis])
-                    ti.atomic_add(self.count[a], 1)
-                if free_b:
-                    for axis in ti.static(range(3)):
-                        ti.atomic_add(self.delta[b][axis], -correction[axis])
-                    ti.atomic_add(self.count[b], 1)
-
-        @ti.kernel
-        def seam_corrections(self):
-            for index in self.seams:
-                if self.seam_captured[index] != 0:
-                    pair = self.seams[index]
-                    self.add_distance_correction(pair[0], pair[1], self.seam_rest[index], 1.0)
-
-        @ti.kernel
-        def apply_seam_attraction(self, dt: ti.f32):
-            for index in self.seams:
-                if self.seam_captured[index] == 0:
-                    pair = self.seams[index]
-                    difference = self.x[pair[1]] - self.x[pair[0]]
-                    length = difference.norm()
-                    if length > 1.0e-8:
-                        impulse = difference * (SEAM_ATTRACTION_FORCE * dt / length)
-                        if self.locked[pair[0]] == 0:
-                            for axis in ti.static(range(3)):
-                                ti.atomic_add(self.velocity[pair[0]][axis], impulse[axis])
-                        if self.locked[pair[1]] == 0:
-                            for axis in ti.static(range(3)):
-                                ti.atomic_add(self.velocity[pair[1]][axis], -impulse[axis])
-
-        @ti.kernel
-        def update_seam_capture(self):
-            for index in self.seams:
-                if self.seam_captured[index] == 0:
-                    pair = self.seams[index]
-                    current = self.x[pair[1]] - self.x[pair[0]]
-                    previous = self.previous[pair[1]] - self.previous[pair[0]]
-                    if current.norm() <= SEAM_CAPTURE_DISTANCE_M or current.dot(previous) <= 0.0:
-                        self.seam_captured[index] = 1
-
-        @ti.kernel
-        def stretch_corrections(self):
-            for index in range(self.edge_count):
-                edge = self.edges[index]
-                self.add_distance_correction(edge[0], edge[1], self.edge_rest[index], STRETCH_RELAXATION)
-
-        @ti.kernel
-        def shear_corrections(self):
-            for index in range(self.quad_count):
-                quad = self.quads[index]
-                x0 = self.x[quad[0]]
-                x1 = self.x[quad[1]]
-                x2 = self.x[quad[2]]
-                x3 = self.x[quad[3]]
-                u = 0.5 * ((x1 - x0) + (x2 - x3))
-                v = 0.5 * ((x3 - x0) + (x2 - x1))
-                value = u.dot(v) - self.quad_rest[index][2]
-                gradients = ti.Matrix.rows([
-                    -0.5 * (u + v),
-                    0.5 * (v - u),
-                    0.5 * (u + v),
-                    0.5 * (u - v),
-                ])
-                denominator = 0.0
-                for corner in ti.static(range(4)):
-                    if self.locked[quad[corner]] == 0:
-                        denominator += gradients[corner, 0] ** 2 + gradients[corner, 1] ** 2 + gradients[corner, 2] ** 2
-                if denominator > 1.0e-16:
-                    multiplier = -SHEAR_RELAXATION * value / denominator
-                    for corner in ti.static(range(4)):
-                        vertex = quad[corner]
-                        if self.locked[vertex] == 0:
-                            for axis in ti.static(range(3)):
-                                ti.atomic_add(self.delta[vertex][axis], multiplier * gradients[corner, axis])
-                            ti.atomic_add(self.count[vertex], 1)
-
-        @ti.kernel
-        def bend_corrections(self):
-            for index in range(self.bend_count):
-                bend = self.bends[index]
-                rest = self.bend_rest[index]
-                coefficients = ti.Vector([
-                    1.0 / rest[0],
-                    -(1.0 / rest[0] + 1.0 / rest[1]),
-                    1.0 / rest[1],
-                ])
-                curvature = (
-                    coefficients[0] * self.x[bend[0]]
-                    + coefficients[1] * self.x[bend[1]]
-                    + coefficients[2] * self.x[bend[2]]
-                )
-                denominator = 0.0
-                for point in ti.static(range(3)):
-                    if self.locked[bend[point]] == 0:
-                        denominator += coefficients[point] ** 2
-                if denominator > 1.0e-8:
-                    for point in ti.static(range(3)):
-                        vertex = bend[point]
-                        if self.locked[vertex] == 0:
-                            scale = -BEND_RELAXATION * coefficients[point] / denominator
-                            for axis in ti.static(range(3)):
-                                ti.atomic_add(self.delta[vertex][axis], scale * curvature[axis])
-                            ti.atomic_add(self.count[vertex], 1)
-
-        @ti.kernel
-        def replace_seam_state(self, values: ti.types.ndarray(dtype=ti.f32, ndim=1)):
-            for index in self.seams:
-                self.seam_rest[index] = values[index]
-
-        @ti.kernel
-        def apply_corrections(self):
-            for index in range(self.vertex_count):
-                if self.locked[index] == 0 and self.count[index] > 0:
-                    self.x[index] += self.delta[index] / ti.cast(self.count[index], ti.f32)
-
-        @ti.func
-        def closest_triangle_point(self, point, a, b, c):
-            ab = b - a
-            ac = c - a
-            ap = point - a
-            d1 = ab.dot(ap)
-            d2 = ac.dot(ap)
-            result = a
-            if d1 <= 0.0 and d2 <= 0.0:
-                result = a
-            else:
-                bp = point - b
-                d3 = ab.dot(bp)
-                d4 = ac.dot(bp)
-                if d3 >= 0.0 and d4 <= d3:
-                    result = b
-                else:
-                    vc = d1 * d4 - d3 * d2
-                    if vc <= 0.0 and d1 >= 0.0 and d3 <= 0.0:
-                        v = d1 / (d1 - d3)
-                        result = a + v * ab
-                    else:
-                        cp = point - c
-                        d5 = ab.dot(cp)
-                        d6 = ac.dot(cp)
-                        if d6 >= 0.0 and d5 <= d6:
-                            result = c
-                        else:
-                            vb = d5 * d2 - d1 * d6
-                            if vb <= 0.0 and d2 >= 0.0 and d6 <= 0.0:
-                                w = d2 / (d2 - d6)
-                                result = a + w * ac
-                            else:
-                                va = d3 * d6 - d5 * d4
-                                if va <= 0.0 and (d4 - d3) >= 0.0 and (d5 - d6) >= 0.0:
-                                    w = (d4 - d3) / ((d4 - d3) + (d5 - d6))
-                                    result = b + w * (c - b)
-                                else:
-                                    denominator = 1.0 / (va + vb + vc)
-                                    v = vb * denominator
-                                    w = vc * denominator
-                                    result = a + ab * v + ac * w
-            return result
-
-        @ti.kernel
-        def body_collisions(self, candidates: ti.types.ndarray(dtype=ti.i32, ndim=2), candidate_count: ti.i32):
-            for pair_index in range(candidate_count):
-                vertex = candidates[pair_index, 0]
-                triangle = self.body_faces[candidates[pair_index, 1]]
-                a = self.body_x[triangle[0]]
-                b = self.body_x[triangle[1]]
-                c = self.body_x[triangle[2]]
-                normal = (b - a).cross(c - a).normalized(1.0e-8)
-                closest = self.closest_triangle_point(self.x[vertex], a, b, c)
-                separation = self.x[vertex] - closest
-                distance = separation.norm()
-                signed_distance = separation.dot(normal)
-                if distance < CONTACT_THICKNESS_M * 2.0 and signed_distance < CONTACT_THICKNESS_M:
-                    correction = normal * (CONTACT_THICKNESS_M - signed_distance)
-                    correction_length = correction.norm()
-                    if correction_length > CONTACT_CORRECTION_MAX_M:
-                        correction *= CONTACT_CORRECTION_MAX_M / correction_length
-                    for axis in ti.static(range(3)):
-                        ti.atomic_add(self.delta[vertex][axis], correction[axis])
-                    ti.atomic_add(self.count[vertex], 1)
-
-        @ti.kernel
-        def update_velocities(self, dt: ti.f32):
-            for index in range(self.vertex_count):
-                if self.locked[index] == 0:
-                    self.velocity[index] = (self.x[index] - self.previous[index]) / dt
-                else:
-                    self.velocity[index] = ti.Vector.zero(ti.f32, 3)
-
-        def advance(self, body_candidates, gravity_magnitude, solver_iterations):
-            for _step in range(STEPS_PER_CLICK):
-                self.apply_seam_attraction(TIME_STEP)
-                self.integrate(TIME_STEP, gravity_magnitude)
-                self.update_seam_capture()
-                for _iteration in range(solver_iterations):
-                    self.update_seam_capture()
-                    self.clear_corrections()
-                    self.seam_corrections()
-                    self.apply_corrections()
-                    self.clear_corrections()
-                    self.shear_corrections()
-                    self.bend_corrections()
-                    self.apply_corrections()
-                    self.clear_corrections()
-                    self.stretch_corrections()
-                    self.apply_corrections()
-                    self.clear_corrections()
-                    self.stretch_corrections()
-                    self.apply_corrections()
-                    self.clear_corrections()
-                    self.stretch_corrections()
-                    self.apply_corrections()
-                    self.clear_corrections()
-                    self.stretch_corrections()
-                    self.apply_corrections()
-                    self.clear_corrections()
-                    self.seam_corrections()
-                    self.apply_corrections()
-                    self.clear_corrections()
-                    if len(body_candidates):
-                        self.body_collisions(body_candidates, len(body_candidates))
-                    self.apply_corrections()
-                for _cleanup in range(solver_iterations * 4):
-                    self.clear_corrections()
-                    self.stretch_corrections()
-                    self.apply_corrections()
-                    self.clear_corrections()
-                    self.seam_corrections()
-                    self.apply_corrections()
-                self.clear_corrections()
-                if len(body_candidates):
-                    self.body_collisions(body_candidates, len(body_candidates))
-                self.apply_corrections()
-                self.update_velocities(TIME_STEP)
-
-        def state(self):
-            return self.x.to_numpy(), self.velocity.to_numpy()
-
-        def seam_state(self):
-            return self.seam_rest.to_numpy()
-
-    return _TaichiRuntime
-
-
 class _KitsukeSession:
     def __init__(self, context, collection, body, preview, backend: str):
         objects = list(participating_parts(collection))
         if len(objects) < 2:
             raise KitsukeError(
-                "Sewing required: at least two parts must be moved from Load or locked by Auto."
+                "Automatic Sewing needs at least two pending or completed parts."
             )
         ranges: list[_PartRange] = []
         position_blocks: list[np.ndarray] = []
@@ -907,25 +513,14 @@ class _KitsukeSession:
         self.matrices = {part.obj.name: _matrix_tuple(part.obj.matrix_world) for part in ranges}
         self.preview = preview
         try:
-            if backend == KITSUKE_BACKEND_STABLE_COSSERAT:
-                self.runtime = NativeCosseratRuntime(
-                    self.positions,
-                    self.velocities,
-                    self.seams,
-                    self.topology,
-                    self.body,
-                    self.locked,
-                )
-            else:
-                _ti, runtime_type = _ensure_taichi()
-                self.runtime = runtime_type(
-                    self.positions,
-                    self.velocities,
-                    self.seams,
-                    self.topology,
-                    self.body,
-                    self.locked,
-                )
+            self.runtime = NativeCosseratRuntime(
+                self.positions,
+                self.velocities,
+                self.seams,
+                self.topology,
+                self.body,
+                self.locked,
+            )
         except NativeCosseratError as exc:
             raise KitsukeError(str(exc)) from exc
         if persisted is not None:
@@ -974,11 +569,10 @@ class _KitsukeSession:
             self.positions[part.start : part.start + part.count] = _world_vertices(obj)
             obj.hide_set(False)
             obj.hide_render = False
-        if self.backend == KITSUKE_BACKEND_STABLE_COSSERAT:
-            # Blender mesh coordinates are the undoable authority. Keep the
-            # live native state on their exact float32 round trip so the next
-            # click and an Undo-reconstructed repeat start bit-for-bit alike.
-            self.runtime.replace_state(self.positions, self.velocities, self.locked)
+        # Blender mesh coordinates are the undoable authority. Keep the live
+        # native state on their exact float32 round trip so the next click and
+        # an Undo-reconstructed repeat start bit-for-bit alike.
+        self.runtime.replace_state(self.positions, self.velocities, self.locked)
         if self.preview is not None:
             mesh = self.preview.data
             bpy.data.objects.remove(self.preview, do_unlink=True)
@@ -1007,13 +601,6 @@ class _KitsukeSession:
 
     def advance(self, context, gravity_magnitude: float, solver_iterations: int):
         self._read_user_transforms()
-        # The legacy backend retains a one-shot correction for vertices already
-        # inside Body; the native backend uses only its incremental contact path.
-        if (
-            self.backend != KITSUKE_BACKEND_STABLE_COSSERAT
-            and _project_body_penetrations(self.body, self.positions, self.velocities, self.locked)
-        ):
-            self.runtime.replace_state(self.positions, self.velocities, self.locked)
         previous_positions = self.positions.copy()
         previous_velocities = self.velocities.copy()
         previous_seams = self.runtime.seam_state()
@@ -1030,16 +617,13 @@ class _KitsukeSession:
             self.velocities = previous_velocities
             self.runtime.replace_state(self.positions, self.velocities, self.locked)
             self.runtime.replace_seam_state(previous_seams)
-            native_detail = ""
-            if self.backend == KITSUKE_BACKEND_STABLE_COSSERAT:
-                stats = self.runtime.last_stats
-                native_detail = (
-                    f"material {int(stats.get('edge_count', 0))} edges/"
-                    f"{int(stats.get('quad_count', 0))} quads/"
-                    f"{int(stats.get('bend_count', 0))} bends, "
-                    f"Body candidates {int(stats.get('body_candidate_count', 0))}"
-                )
-            detail = f"; {native_detail}" if native_detail else ""
+            stats = self.runtime.last_stats
+            detail = (
+                f"; material {int(stats.get('edge_count', 0))} edges/"
+                f"{int(stats.get('quad_count', 0))} quads/"
+                f"{int(stats.get('bend_count', 0))} bends, "
+                f"Body candidates {int(stats.get('body_candidate_count', 0))}"
+            )
             raise KitsukeError(
                 f"The simulation returned a non-finite state{detail} "
                 "and was rolled back without changing the cloth."
@@ -1084,16 +668,9 @@ def advance_kitsuke(
             f"This live Kitsuke session uses {session.backend}. Undo to Sewing or reload the pattern before changing solvers."
         )
     session.advance(context, gravity_magnitude, solver_iterations)
-    if backend == KITSUKE_BACKEND_STABLE_COSSERAT:
-        return (
-            f"Kitsuke: square-lattice cloth + constant-force seams, {STEPS_PER_CLICK} steps; "
-            f"material/contact {solver_iterations} iterations; gravity -Z {gravity_magnitude:.3g} m/s²"
-        )
-    ti, _runtime = _ensure_taichi()
-    arch = str(ti.lang.impl.current_cfg().arch).split(".")[-1]
     return (
-        f"Kitsuke: {STEPS_PER_CLICK} steps x {solver_iterations} iterations on {arch}; "
-        f"gravity -Z {gravity_magnitude:.3g} m/s², constant-force seams"
+        f"GRAVITY: square-lattice cloth + constant-force seams, {STEPS_PER_CLICK} steps; "
+        f"material/contact {solver_iterations} iterations; gravity -Z {gravity_magnitude:.3g} m/s²"
     )
 
 

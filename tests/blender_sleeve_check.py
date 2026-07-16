@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import os
-import importlib
 import sys
 from pathlib import Path
 
@@ -13,7 +12,7 @@ import numpy as np
 
 installed_check = os.environ.get("YOHSAI_INSTALLED_CHECK") == "1"
 if installed_check:
-    from bl_ext.user_default.yohsai import kitsuke, mesh_loader, ui, yohsai_svg_parser  # noqa: E402
+    from bl_ext.user_default.yohsai import kitsuke, mesh_loader, ui  # noqa: E402
     for wheel in sorted((Path(mesh_loader.__file__).parent / "wheels").glob("*.whl")):
         sys.path.insert(0, str(wheel))
 else:
@@ -26,30 +25,31 @@ else:
     package = load_source_package(repo)
     kitsuke = sys.modules[f"{package.__name__}.kitsuke"]
     mesh_loader = sys.modules[f"{package.__name__}.mesh_loader"]
-    yohsai_svg_parser = importlib.import_module(f"{package.__name__}.yohsai_svg_parser")
+    ui = sys.modules[f"{package.__name__}.ui"]
 
 
 source = Path.home() / "Desktop" / "test3.pdf"
 if not source.is_file():
     raise RuntimeError("Missing integration input: Desktop/test3.pdf")
 
-if installed_check:
-    bpy.context.scene.yohsai.svg_path = str(source)
-    assert bpy.ops.yohsai.load_svg() == {"FINISHED"}
-    ui._parse_process.wait(timeout=30)
-    ui._poll_svg_parser()
-    assert bpy.context.scene.yohsai.parse_status.startswith("Loaded CLOTHES_001: 4 part(s)")
-    document = ui._loaded_pattern_json
-    collection = bpy.context.scene.yohsai.clothes_collection
-else:
+if not installed_check:
     bpy.ops.wm.read_factory_settings(use_empty=True)
-    document = yohsai_svg_parser.parse_pdf(source)
-    collection = mesh_loader.create_clothes_mesh(bpy.context, document)
+    package.register()
+bpy.context.scene.yohsai.svg_path = str(source)
+assert bpy.ops.yohsai.load_svg() == {"FINISHED"}
+ui._parse_process.wait(timeout=30)
+ui._poll_svg_parser()
+assert bpy.context.scene.yohsai.parse_status.startswith("Loaded CLOTHES_001: 4 part(s)")
+assert bpy.context.scene.yohsai.auto_lock
+document = ui._loaded_pattern_json
+collection = bpy.context.scene.yohsai.clothes_collection
 parts = sorted(
     (obj for obj in collection.objects if obj.get("yohsai_role") == "part"),
     key=lambda obj: int(obj["yohsai_panel_index"]),
 )
 assert len(parts) == 4
+assert all(mesh_loader.part_gravity_state(obj) == mesh_loader.GRAVITY_STATE_PLACED for obj in parts)
+assert all(bool(obj[mesh_loader.LOCKED_OBJECT_KEY]) for obj in parts)
 assert [obj["yohsai_panel_label"] for obj in parts] == ["OMOTE", "URA", "SODE", "SODE"]
 assert [obj["yohsai_mirror_side"] for obj in parts] == ["", "", "LEFT", "RIGHT"]
 
@@ -107,12 +107,14 @@ assert [obj["yohsai_panel_instance"] for obj in parts] == ["OMOTE", "URA", "SODE
 for obj in body:
     obj.location.x += 0.001
 bpy.context.view_layer.update()
+mesh_loader.mark_moved_parts_pending(collection)
 body_plan = mesh_loader.build_sewing_plan(collection)
 assert body_plan.parts == tuple(body)
 assert body_plan.labels == ("A", "B")
 
 sleeves[0].location.x += 0.001
 bpy.context.view_layer.update()
+mesh_loader.mark_moved_parts_pending(collection)
 left_sleeve_plan = mesh_loader.build_sewing_plan(collection)
 assert left_sleeve_plan.parts == tuple(parts[:3])
 assert left_sleeve_plan.labels == ("A", "B", "C")
@@ -130,6 +132,7 @@ assert all(a in left_sleeve_range or b in left_sleeve_range for a, b in left_c_c
 
 sleeves[1].location.x += 0.001
 bpy.context.view_layer.update()
+mesh_loader.mark_moved_parts_pending(collection)
 plan = mesh_loader.build_sewing_plan(collection)
 assert plan.labels == ("A", "B", "C")
 c_connections = [(a, b) for label, a, b in plan.connections if label == "C"]

@@ -17,7 +17,6 @@ from bpy.types import Collection, Object, Operator, Panel, PropertyGroup
 
 from .kitsuke import (
     KitsukeError,
-    LOCKED_OBJECT_KEY,
     KITSUKE_BACKEND_STABLE_COSSERAT,
     NORMAL_GRAVITY_M_PER_SECOND_SQUARED,
     SOLVER_ITERATIONS,
@@ -25,11 +24,20 @@ from .kitsuke import (
     advance_kitsuke,
     clear_kitsuke_session,
     clear_sessions,
-    completed_kitsuke_parts,
     has_kitsuke_session,
     reset_runtime_epoch,
 )
-from .mesh_loader import create_clothes_mesh, create_sewn_mesh, update_clothes_mesh
+from .mesh_loader import (
+    LOCKED_OBJECT_KEY,
+    apply_auto_lock,
+    create_clothes_mesh,
+    create_sewn_mesh,
+    mark_moved_parts_pending,
+    mark_pending_parts_done,
+    participating_parts,
+    remove_sewn_preview,
+    update_clothes_mesh,
+)
 
 
 _parse_process: subprocess.Popen[str] | None = None
@@ -98,6 +106,23 @@ def _clothes_part_objects(collection: Collection | None) -> list[Object]:
     ]
 
 
+def _all_clothes_collections() -> list[Collection]:
+    return [
+        collection
+        for collection in bpy.data.collections
+        if collection.get("yohsai_role") == "clothes"
+    ]
+
+
+def _apply_auto_lock_all(properties) -> None:
+    for collection in _all_clothes_collections():
+        apply_auto_lock(collection, bool(properties.auto_lock))
+
+
+def _update_auto_lock(properties, _context) -> None:
+    _apply_auto_lock_all(properties)
+
+
 def _lock_scope_collections(properties, objects: list[Object]) -> list[Collection]:
     collections: list[Collection] = []
     seen: set[str] = set()
@@ -133,21 +158,14 @@ def _get_lock_selection(properties) -> bool:
 def _set_lock_selection(properties, value: bool) -> None:
     objects = _selected_mesh_objects()
     parts = _lock_scope_parts(properties, objects)
-    if value:
-        if not objects:
-            properties.parse_status = "Select mesh object(s) before changing Lock."
-            return
-        for obj in parts:
-            obj[LOCKED_OBJECT_KEY] = False
-        for obj in objects:
-            obj[LOCKED_OBJECT_KEY] = True
-        properties.parse_status = f"Locked {len(objects)} selected mesh object(s) for Kitsuke deformation."
+    if not objects:
+        properties.parse_status = "Select clothes part(s) before changing Lock."
         return
-
-    targets = parts if parts else objects
+    targets = [obj for obj in objects if obj in parts]
     for obj in targets:
-        obj[LOCKED_OBJECT_KEY] = False
-    properties.parse_status = f"Unlocked {len(targets)} mesh object(s) for Kitsuke deformation."
+        obj[LOCKED_OBJECT_KEY] = bool(value)
+    action = "Locked" if value else "Unlocked"
+    properties.parse_status = f"{action} {len(targets)} selected clothes part(s) for GRAVITY."
 
 
 def _parser_data_dir() -> str:
@@ -226,14 +244,16 @@ def _poll_svg_parser() -> float | None:
             clear_kitsuke_session(clothes_collection)
             message = f"Updated {clothes_collection.name}: {vertex_count} vertices"
             if sewing_changed:
-                message += "; Sewing required"
+                message += "; Sewing will rebuild on GRAVITY"
             _set_parse_status(message)
         else:
             clothes_collection = create_clothes_mesh(bpy.context, validated_document)
             if scene is not None and hasattr(scene, "yohsai"):
                 scene.yohsai.clothes_collection = clothes_collection
+                scene.yohsai.auto_lock = True
+                _apply_auto_lock_all(scene.yohsai)
             part_count = sum(obj.get("yohsai_role") == "part" for obj in clothes_collection.objects)
-            _set_parse_status(f"Loaded {clothes_collection.name}: {part_count} part(s)")
+            _set_parse_status(f"Loaded {clothes_collection.name}: {part_count} part(s); Auto lock on")
         _loaded_pattern_json = validated_document
     except Exception as exc:
         operation = "Update" if _parse_action == "UPDATE" else "Load"
@@ -260,63 +280,27 @@ class YohsaiProperties(PropertyGroup):
     )
     clothes_collection: PointerProperty(
         name="Clothes",
-        description="Loaded Yohsai clothes collection used by Sewing",
+        description="Loaded Yohsai clothes collection used by GRAVITY",
         type=Collection,
     )
     body_object: PointerProperty(
         name="Body",
-        description="Fixed body mesh used for Kitsuke collision",
+        description="Fixed body mesh used for GRAVITY collision",
         type=Object,
         poll=_mesh_object_poll,
     )
     lock_selection: BoolProperty(
         name="Lock",
-        description="Exclude selected mesh object(s) from Kitsuke deformation while keeping sewing information",
+        description="Independent deformation Lock for selected clothes parts",
         get=_get_lock_selection,
         set=_set_lock_selection,
     )
-
-
-class YOHSAI_OT_lock_auto(Operator):
-    bl_idname = "yohsai.lock_auto"
-    bl_label = "Auto"
-    bl_description = "Lock the parts completed by Kitsuke and start the next incremental Sewing stage"
-    bl_options = {"REGISTER", "UNDO"}
-
-    @classmethod
-    def poll(cls, context):
-        if context.mode != "OBJECT" or not hasattr(context.scene, "yohsai"):
-            return False
-        return bool(completed_kitsuke_parts(context.scene.yohsai.clothes_collection))
-
-    def execute(self, context):
-        props = context.scene.yohsai
-        collection = props.clothes_collection
-        parts = completed_kitsuke_parts(collection)
-        if not parts:
-            message = "Run Kitsuke successfully before using Auto."
-            props.parse_status = f"Auto failed: {message}"
-            self.report({"ERROR"}, message)
-            return {"CANCELLED"}
-
-        for obj in parts:
-            obj[LOCKED_OBJECT_KEY] = True
-        clear_kitsuke_session(collection)
-        collection["yohsai_sewing_verified"] = False
-
-        for selected in context.selected_objects:
-            selected.select_set(False)
-        for obj in parts:
-            obj.hide_set(False)
-            obj.hide_render = False
-            obj.select_set(True)
-        context.view_layer.objects.active = parts[0]
-        context.view_layer.update()
-
-        message = f"Auto locked {len(parts)} dressed part(s); move the next part, then run Sewing."
-        props.parse_status = message
-        self.report({"INFO"}, message)
-        return {"FINISHED"}
+    auto_lock: BoolProperty(
+        name="Auto",
+        description="Apply Auto-lock to placement-state and Gravity-completed parts",
+        default=True,
+        update=_update_auto_lock,
+    )
 
 
 class YOHSAI_OT_load_svg(Operator):
@@ -430,52 +414,46 @@ class YOHSAI_OT_update_svg(Operator):
         return {"FINISHED"}
 
 
-class YOHSAI_OT_sewing(Operator):
-    bl_idname = "yohsai.sewing"
-    bl_label = "Sewing"
-    bl_description = "Verify ordered sewing edges and build a connectivity preview"
-    bl_options = {"REGISTER", "UNDO"}
-
-    def execute(self, context):
-        props = context.scene.yohsai
-        collection = props.clothes_collection
-        if has_kitsuke_session(collection):
-            message = "Kitsuke has already started. Reload the pattern before creating a new Sewing preview."
-            props.parse_status = f"Sewing failed: {message}"
-            self.report({"ERROR"}, message)
-            return {"CANCELLED"}
-        try:
-            sewn_object = create_sewn_mesh(context, collection)
-        except Exception as exc:
-            message = str(exc).strip() or type(exc).__name__
-            props.parse_status = f"Sewing failed: {message[:240]}"
-            self.report({"ERROR"}, message)
-            return {"CANCELLED"}
-        message = f"Sewn {sewn_object.name}"
-        props.parse_status = message
-        self.report({"INFO"}, message)
-        return {"FINISHED"}
-
-
-def _run_kitsuke(operator: Operator, context, gravity_magnitude: float):
+def _run_gravity(operator: Operator, context, gravity_magnitude: float):
     props = context.scene.yohsai
+    collection = props.clothes_collection
+    pending_parts: tuple[Object, ...] = ()
     try:
+        if collection is None or collection.get("yohsai_role") != "clothes":
+            raise KitsukeError("No loaded Yohsai clothes collection is selected.")
+        if props.body_object is None:
+            raise KitsukeError("Select a mesh Body before pressing GRAVITY.")
+
+        pending_parts = mark_moved_parts_pending(collection)
+        sewing_required = bool(pending_parts) or (
+            not has_kitsuke_session(collection)
+            and not bool(collection.get("yohsai_sewing_verified", False))
+        )
+        if sewing_required:
+            if not pending_parts and len(participating_parts(collection)) < 2:
+                raise KitsukeError("Move at least two connected pattern parts before pressing GRAVITY.")
+            # Each new pending stage gets sewing connections from its current
+            # Object Mode placement.  Completed parts remain in the plan as
+            # locked anchors when Auto is on.  A changed Update signature also
+            # rebuilds from completed participants so the hidden Sewing action
+            # is never required for recovery.
+            clear_kitsuke_session(collection)
+            remove_sewn_preview(collection, reveal_parts=True)
+            collection["yohsai_sewing_verified"] = False
+            create_sewn_mesh(context, collection)
+
         message = advance_kitsuke(
             context,
-            props.clothes_collection,
+            collection,
             props.body_object,
             gravity_magnitude,
             SOLVER_ITERATIONS,
             KITSUKE_BACKEND_STABLE_COSSERAT,
         )
-    except KitsukeError as exc:
-        message = str(exc).strip() or type(exc).__name__
-        props.parse_status = f"Kitsuke failed: {message[:240]}"
-        operator.report({"ERROR"}, message)
-        return {"CANCELLED"}
+        mark_pending_parts_done(pending_parts)
     except Exception as exc:
         message = str(exc).strip() or type(exc).__name__
-        props.parse_status = f"Kitsuke failed: {message[:240]}"
+        props.parse_status = f"GRAVITY failed: {message[:240]}"
         operator.report({"ERROR"}, message)
         return {"CANCELLED"}
     props.parse_status = message
@@ -485,8 +463,8 @@ def _run_kitsuke(operator: Operator, context, gravity_magnitude: float):
 
 class YOHSAI_OT_kitsuke_zero_gravity(Operator):
     bl_idname = "yohsai.kitsuke_zero_gravity"
-    bl_label = "Zero gravity"
-    bl_description = "Advance Kitsuke without gravity while retaining the live session"
+    bl_label = "Zero GRAVITY"
+    bl_description = "Run automatic Sewing, then advance without gravity"
     bl_options = {"REGISTER", "UNDO"}
 
     @classmethod
@@ -494,13 +472,13 @@ class YOHSAI_OT_kitsuke_zero_gravity(Operator):
         return context.mode == "OBJECT"
 
     def execute(self, context):
-        return _run_kitsuke(self, context, ZERO_GRAVITY_M_PER_SECOND_SQUARED)
+        return _run_gravity(self, context, ZERO_GRAVITY_M_PER_SECOND_SQUARED)
 
 
 class YOHSAI_OT_kitsuke(Operator):
     bl_idname = "yohsai.kitsuke"
-    bl_label = "Normal gravity"
-    bl_description = "Advance Kitsuke with normal gravity (9.81 m/s²) while retaining the live session"
+    bl_label = "Normal GRAVITY"
+    bl_description = "Run automatic Sewing, then advance with normal gravity (9.81 m/s²)"
     bl_options = {"REGISTER", "UNDO"}
 
     @classmethod
@@ -508,7 +486,7 @@ class YOHSAI_OT_kitsuke(Operator):
         return context.mode == "OBJECT"
 
     def execute(self, context):
-        return _run_kitsuke(self, context, NORMAL_GRAVITY_M_PER_SECOND_SQUARED)
+        return _run_gravity(self, context, NORMAL_GRAVITY_M_PER_SECOND_SQUARED)
 
 
 class YOHSAI_PT_main(Panel):
@@ -530,24 +508,21 @@ class YOHSAI_PT_main(Panel):
         inputs.prop(props, "body_object")
         lock_row = inputs.row(align=True)
         lock_row.prop(props, "lock_selection")
-        lock_row.operator(YOHSAI_OT_lock_auto.bl_idname, text="Auto")
+        lock_row.prop(props, "auto_lock", text="Auto", toggle=True)
         layout.separator(factor=0.4)
         actions = layout.column(align=True)
         actions.operator(YOHSAI_OT_load_svg.bl_idname, text="Load")
         actions.operator(YOHSAI_OT_update_svg.bl_idname, text="Update")
-        actions.operator(YOHSAI_OT_sewing.bl_idname, text="Sewing")
         gravity_actions = actions.row(align=True)
-        gravity_actions.operator(YOHSAI_OT_kitsuke_zero_gravity.bl_idname, text="Zero gravity")
-        gravity_actions.operator(YOHSAI_OT_kitsuke.bl_idname, text="Normal gravity")
+        gravity_actions.operator(YOHSAI_OT_kitsuke_zero_gravity.bl_idname, text="Zero GRAVITY")
+        gravity_actions.operator(YOHSAI_OT_kitsuke.bl_idname, text="Normal GRAVITY")
         layout.label(text=props.parse_status)
 
 
 _classes = (
     YohsaiProperties,
-    YOHSAI_OT_lock_auto,
     YOHSAI_OT_load_svg,
     YOHSAI_OT_update_svg,
-    YOHSAI_OT_sewing,
     YOHSAI_OT_kitsuke_zero_gravity,
     YOHSAI_OT_kitsuke,
     YOHSAI_PT_main,

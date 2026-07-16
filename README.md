@@ -14,19 +14,29 @@ The N-panel contains these inputs:
 
 - `Pattern Path`: the Illustrator PDF;
 - `Clothes`: the loaded Yohsai collection;
-- `Body`: the fixed collision mesh used by Kitsuke.
+- `Body`: the fixed collision mesh used by GRAVITY.
 
 The normal operation order is:
 
-1. `Load` creates one Mesh object per pattern panel instance.
+1. `Load` creates one Mesh object per pattern panel instance and turns `Auto` on.
 2. Translate and rotate the separate parts in Object Mode.
-3. `Sewing` validates sewing paths and creates a connectivity preview.
-4. Select the Body, then press `Zero gravity` or `Normal gravity`.
-5. Continue placement and use either gravity button in any order.
-6. Use `Update` after editing the same Illustrator PDF.
+3. Select the Body, then press `Zero GRAVITY` or `Normal GRAVITY`. Yohsai runs
+   Sewing automatically immediately before the simulation.
+4. Continue placement and use either GRAVITY button in any order.
+5. Use `Update` after editing the same Illustrator PDF.
 
-`Lock` excludes selected part objects from Kitsuke deformation while retaining
-their sewing connectivity.
+Every part has two independent attributes: the monotonic `PLACED` -> `PENDING`
+-> `DONE` state and one deformation Lock. Moving a `PLACED` part makes it
+`PENDING` at the next GRAVITY click and unlocks it; a successful click changes
+its state to `DONE` without changing that Lock. It therefore remains deformable
+for repeated GRAVITY clicks.
+
+Load turns `Auto` on and performs one Auto-lock operation: `PLACED` and existing
+`DONE` parts are locked, while pending parts are unlocked. Turning Auto off
+immediately unlocks every non-placed part; turning it on performs the Auto-lock
+operation again. A `PLACED` part remains outside the simulation. `Lock` directly
+changes the same independent deformation attribute on selected clothes parts.
+The Auto control is a colored toggle whose pressed state shows that it is on.
 
 ## Pattern input
 
@@ -46,23 +56,25 @@ Load samples a 5 mm square material lattice in pattern-page coordinates and
 uses triangles as the Blender and collision proxy. Pattern coordinates retain
 the material rest state.
 
-## Sewing
+## Automatic Sewing
 
-Sewing uses the world-space positions of the separate source parts. It orders
+The GRAVITY buttons run Sewing from the world-space positions of the separate
+source parts before a new pending stage. Sewing orders
 marked boundary paths, matches them by normalized authored distance, and stores
-cross-panel pairs as loose preview edges.
+cross-panel pairs in a transient preview.
 
-Load records every part's initial Object Mode transform. Sewing ignores parts
-that remain at that transform and includes only moved parts plus parts committed
-by Auto. Unresolvable paths stay pending; when a moved part completes one side
-of a multipart sewing group, that side is sewn without waiting for later parts.
+Load records every part's initial Object Mode transform. Automatic Sewing ignores
+parts still in `PLACED`, includes `PENDING` parts as the new work, and retains
+`DONE` parts as connectivity anchors. Unresolvable paths stay pending; when a
+moved part completes one side of a multipart sewing group, that side is sewn
+without waiting for later parts.
 
 The preview is a visual connectivity record. It does not define a replacement
 initial cloth shape. Body geometry is not used by Sewing.
 
-## Kitsuke
+## GRAVITY
 
-Kitsuke starts from the positioned source-panel vertices. The solver is always
+GRAVITY starts from the positioned source-panel vertices. The solver is always
 the native CPU Square-Lattice Cloth solver; no solver or iteration setup is
 required.
 
@@ -88,10 +100,10 @@ translation and rotation are supported between clicks; scaling and vertex-count
 changes are rejected. Finite movement is not capped or rolled back; rollback is
 reserved for a non-finite solver state.
 
-Auto commits the parts written by the latest successful Kitsuke click. It locks
-those parts against further deformation, ends that live session, and makes the
-next moved part eligible for a new Sewing/Kitsuke stage. Repeating this cycle
-adds pattern parts incrementally while earlier parts retain seam connectivity.
+On a successful click, pending parts become `DONE` without being relocked, so
+GRAVITY may repeat immediately. Moving another placed part starts a new
+automatic Sewing stage. A later Load or switching Auto on performs the explicit
+Auto-lock operation and locks done parts while retaining seam connectivity.
 
 Undo and Redo store the solver state needed to reconstruct the live session
 inside the same add-on runtime. Continuing a partially dressed session after
@@ -103,8 +115,9 @@ Update rereads the same PDF and recuts the selected Clothes collection. Stable
 `#` labels and mirror instances identify corresponding parts. Existing object
 identity, transforms, materials, and collection ownership remain.
 
-If sewing membership changes, Sewing must be run again. Pattern topology and
-material rest dimensions always come from the revised PDF.
+If sewing membership changes, the next eligible GRAVITY click rebuilds Sewing
+automatically. Pattern topology and material rest dimensions always come from
+the revised PDF.
 
 ## Silhouette utility
 
@@ -113,7 +126,7 @@ Character silhouettes are exported separately with
 
 ## Documentation
 
-- `SVG_TO_JSON_SPEC.md`: input, JSON, Load, Sewing, Kitsuke, and Update contract;
+- `SVG_TO_JSON_SPEC.md`: input, JSON, Load, automatic Sewing, GRAVITY, and Update contract;
 - `DESIGN_PHILOSOPHY.md`: product-level interpretation rules;
 - `KITSUKE_DESIGN.md`: current simulation workflow and invariants;
 - `COSSERAT_DESIGN.md`: native particle solver and compatibility boundary;

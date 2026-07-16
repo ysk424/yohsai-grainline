@@ -51,6 +51,7 @@ try:
     collection = create_clothes_mesh(bpy.context, document)
     collection_name = collection.name
     bpy.context.scene.yohsai.clothes_collection = collection
+    bpy.context.scene.yohsai.auto_lock = False
 
     bpy.ops.mesh.primitive_cube_add(size=1.0, location=(100.0, 100.0, 100.0))
     body = bpy.context.object
@@ -60,8 +61,6 @@ try:
         if obj.get("yohsai_role") == "part":
             obj.location.x += 0.001
     bpy.ops.ed.undo_push(message="Yohsai Undo test initial state")
-    assert bpy.ops.yohsai.sewing() == {"FINISHED"}
-    bpy.ops.ed.undo_push(message="Yohsai Undo test Sewing")
 
     assert bpy.ops.yohsai.kitsuke() == {"FINISHED"}
     session = kitsuke._sessions[collection.as_pointer()]

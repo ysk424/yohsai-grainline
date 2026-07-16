@@ -1,4 +1,4 @@
-"""Blender-background regression check for incremental Sewing/Kitsuke Auto stages."""
+"""Blender-background regression check for three-state automatic Gravity stages."""
 
 from __future__ import annotations
 
@@ -64,57 +64,125 @@ try:
         )
         assert len(parts) == 4
         assert not mesh_loader.participating_parts(collection)
+        assert [mesh_loader.part_gravity_state(obj) for obj in parts] == [
+            mesh_loader.GRAVITY_STATE_PLACED,
+        ] * 4
+        assert all(bool(obj[mesh_loader.LOCKED_OBJECT_KEY]) for obj in parts)
+        assert bpy.context.scene.yohsai.auto_lock
 
         bpy.ops.mesh.primitive_cube_add(size=1.0, location=(100.0, 100.0, 100.0))
         bpy.context.scene.yohsai.body_object = bpy.context.object
 
         parts[0].location.y += 0.01
+        bpy.context.view_layer.update()
+        try:
+            rejected = bpy.ops.yohsai.kitsuke_zero_gravity()
+        except RuntimeError as exc:
+            assert "at least two" in str(exc)
+        else:
+            assert rejected == {"CANCELLED"}
+        assert mesh_loader.part_gravity_state(parts[0]) == mesh_loader.GRAVITY_STATE_PENDING
+        assert all(
+            mesh_loader.part_gravity_state(obj) == mesh_loader.GRAVITY_STATE_PLACED
+            for obj in parts[1:]
+        )
+
         parts[1].location.y += 0.01
         bpy.context.view_layer.update()
-        first_plan = mesh_loader.build_sewing_plan(collection)
-        assert first_plan.parts == tuple(parts[:2])
-        assert first_plan.labels == ("A",)
-        assert bpy.ops.yohsai.sewing() == {"FINISHED"}
-        preview = next(obj for obj in collection.objects if obj.get("yohsai_role") == "sewn")
-        assert list(preview["yohsai_source_parts"]) == [obj.name for obj in parts[:2]]
-        assert not parts[2].hide_get() and not parts[3].hide_get()
         assert bpy.ops.yohsai.kitsuke_zero_gravity() == {"FINISHED"}
         first_session = kitsuke._sessions[collection.as_pointer()]
         assert [part.obj for part in first_session.parts] == parts[:2]
-        kitsuke.clear_sessions()
-        assert kitsuke.completed_kitsuke_parts(collection) == parts[:2]
-        assert bpy.ops.yohsai.lock_auto() == {"FINISHED"}
-        assert [bool(obj.get(mesh_loader.LOCKED_OBJECT_KEY, False)) for obj in parts] == [
-            True, True, False, False
+        first_plan = mesh_loader.build_sewing_plan(collection)
+        assert first_plan.parts == tuple(parts[:2])
+        assert first_plan.labels == ("A",)
+        assert not any(obj.get("yohsai_role") == "sewn" for obj in collection.objects)
+        assert [mesh_loader.part_gravity_state(obj) for obj in parts] == [
+            mesh_loader.GRAVITY_STATE_DONE,
+            mesh_loader.GRAVITY_STATE_DONE,
+            mesh_loader.GRAVITY_STATE_PLACED,
+            mesh_loader.GRAVITY_STATE_PLACED,
         ]
-        assert bpy.context.scene.yohsai.lock_selection
-        assert not kitsuke.has_kitsuke_session(collection)
-        assert not bool(collection["yohsai_sewing_verified"])
+        assert [bool(obj.get(mesh_loader.LOCKED_OBJECT_KEY, False)) for obj in parts] == [
+            False, False, True, True
+        ]
+        # State completion alone does not change Lock, so GRAVITY can repeat.
+        assert bpy.ops.yohsai.kitsuke_zero_gravity() == {"FINISHED"}
+        assert [part.locked for part in first_session.parts] == [False, False]
 
+        # A part selected for the next pending stage must be unlocked by the
+        # GRAVITY click even if its independent Lock was left on it.
+        for obj in bpy.context.selected_objects:
+            obj.select_set(False)
+        parts[2].select_set(True)
+        bpy.context.view_layer.objects.active = parts[2]
+        bpy.context.scene.yohsai.lock_selection = True
+        assert bool(parts[2][mesh_loader.LOCKED_OBJECT_KEY])
         parts[2].location.y += 0.01
         bpy.context.view_layer.update()
-        second_plan = mesh_loader.build_sewing_plan(collection)
-        assert second_plan.parts == tuple(parts[:3])
-        assert second_plan.labels == ("A", "B")
-        assert bpy.ops.yohsai.sewing() == {"FINISHED"}
+        assert mesh_loader.part_gravity_state(parts[2]) == mesh_loader.GRAVITY_STATE_PLACED
+        assert bool(parts[2][mesh_loader.LOCKED_OBJECT_KEY])
         assert bpy.ops.yohsai.kitsuke_zero_gravity() == {"FINISHED"}
         second_session = kitsuke._sessions[collection.as_pointer()]
         assert [part.obj for part in second_session.parts] == parts[:3]
-        assert [part.locked for part in second_session.parts] == [True, True, False]
-        assert bpy.ops.yohsai.lock_auto() == {"FINISHED"}
+        assert [part.locked for part in second_session.parts] == [False, False, False]
+        second_plan = mesh_loader.build_sewing_plan(collection)
+        assert second_plan.parts == tuple(parts[:3])
+        assert second_plan.labels == ("A", "B")
+        assert [bool(obj.get(mesh_loader.LOCKED_OBJECT_KEY, False)) for obj in parts] == [
+            False, False, False, True
+        ]
+        assert [mesh_loader.part_gravity_state(obj) for obj in parts] == [
+            mesh_loader.GRAVITY_STATE_DONE,
+            mesh_loader.GRAVITY_STATE_DONE,
+            mesh_loader.GRAVITY_STATE_DONE,
+            mesh_loader.GRAVITY_STATE_PLACED,
+        ]
+
+        # Auto off unlocks every active completed part.  The untouched fourth
+        # placed part remains locked and outside the simulation.
+        bpy.context.scene.yohsai.auto_lock = False
+        assert [bool(obj.get(mesh_loader.LOCKED_OBJECT_KEY, False)) for obj in parts] == [
+            False, False, False, True
+        ]
+        assert mesh_loader.participating_parts(collection) == tuple(parts[:3])
+        assert bpy.ops.yohsai.kitsuke_zero_gravity() == {"FINISHED"}
+        assert [part.locked for part in second_session.parts] == [False, False, False]
+
+        bpy.context.scene.yohsai.auto_lock = True
+        assert all(bool(obj.get(mesh_loader.LOCKED_OBJECT_KEY, False)) for obj in parts)
+
+        parts[3].location.y += 0.01
+        bpy.context.view_layer.update()
+        assert bpy.ops.yohsai.kitsuke_zero_gravity() == {"FINISHED"}
+        final_session = kitsuke._sessions[collection.as_pointer()]
+        assert [part.locked for part in final_session.parts] == [True, True, True, False]
+        final_plan = mesh_loader.build_sewing_plan(collection)
+        assert final_plan.parts == tuple(parts)
+        assert final_plan.labels == ("A", "B", "C")
+        assert [mesh_loader.part_gravity_state(obj) for obj in parts] == [
+            mesh_loader.GRAVITY_STATE_DONE,
+        ] * 4
         assert [bool(obj.get(mesh_loader.LOCKED_OBJECT_KEY, False)) for obj in parts] == [
             True, True, True, False
         ]
 
-        parts[3].location.y += 0.01
-        bpy.context.view_layer.update()
-        final_plan = mesh_loader.build_sewing_plan(collection)
-        assert final_plan.parts == tuple(parts)
-        assert final_plan.labels == ("A", "B", "C")
-        assert bpy.ops.yohsai.sewing() == {"FINISHED"}
-        final_preview = next(obj for obj in collection.objects if obj.get("yohsai_role") == "sewn")
-        assert list(final_preview["yohsai_source_parts"]) == [obj.name for obj in parts]
+        # Emergency Lock remains independent from Auto.  With Auto off, only
+        # the selected three parts stay fixed and the fourth remains deformable.
+        bpy.context.scene.yohsai.auto_lock = False
+        for obj in bpy.context.selected_objects:
+            obj.select_set(False)
+        for obj in parts[:3]:
+            obj.select_set(True)
+        bpy.context.view_layer.objects.active = parts[0]
+        bpy.context.scene.yohsai.lock_selection = True
+        assert [bool(obj.get(mesh_loader.LOCKED_OBJECT_KEY, False)) for obj in parts] == [
+            True, True, True, False
+        ]
+        assert bpy.ops.yohsai.kitsuke_zero_gravity() == {"FINISHED"}
+        assert [part.locked for part in kitsuke._sessions[collection.as_pointer()].parts] == [
+            True, True, True, False
+        ]
 
-        print("YOHSAI_INCREMENTAL_AUTO_OK stages=2,3,4")
+        print("YOHSAI_GRAVITY_STATE_LOCK_OK stages=2,3,4 repeat=ok auto=on/off lock=ok")
 finally:
     yohsai.unregister()

@@ -6,8 +6,11 @@ Status: current development state
 
 - Illustrator PDF is authoritative for topology and annotations.
 - Load creates separate pattern-part meshes.
-- Sewing records connectivity from positioned source parts and never queries Body.
-- Kitsuke starts from source-part world vertices.
+- GRAVITY promotes parts through PLACED -> PENDING -> DONE without reversal.
+- A new pending GRAVITY stage runs Sewing automatically from positioned source
+  parts; completed parts remain available as connectivity anchors. The single
+  independent deformation Lock is cleared from all pending parts before Sewing.
+- GRAVITY starts from source-part world vertices.
 - Seam goals are fixed at zero and do not shorten per click.
 - Sewing drags a pair kinematically and contributes no momentum.
 - Pattern edges, square metrics, and axial triples provide cloth internal energy.
@@ -16,6 +19,9 @@ Status: current development state
 - Body participates only through contact correction, which dissipates only.
 - Self-contact and Body-relative rest-shape forces are absent.
 - Zero gravity and Normal gravity select 0 or 9.81 m/s² per click in world -Z.
+- Auto is event-driven rather than derived continuously from state. Load and
+  switching Auto on lock PLACED/DONE and unlock PENDING; switching it off
+  unlocks non-placed parts. GRAVITY completion never changes Lock.
 - The product path always uses the native Square-Lattice solver at 20 iterations.
 - Only a non-finite returned state causes click rollback; finite displacement is
   unrestricted.

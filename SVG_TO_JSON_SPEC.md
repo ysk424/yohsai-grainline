@@ -230,15 +230,21 @@ The Yohsai N-panel groups all inputs first:
 
 - `Pattern Path`: a file selector for a PDF document;
 - `Clothes`: the loaded numbered collection used by later actions;
-- `Body`: select the fixed collision mesh used by Kitsuke.
+- `Body`: select the fixed collision mesh used by GRAVITY.
 
 It then exposes the primary actions in workflow order:
 
 - `Load`: parse the pattern and create separate cloth-part objects;
 - `Update`: recut the selected Clothes collection from the same saved file;
-- `Sewing`: build the combined sewn preview after manual part placement;
-- side-by-side `Zero gravity` and `Normal gravity`: advance Kitsuke with 0 or
-  9.81 m/s² and restore separate parts.
+- side-by-side `Zero GRAVITY` and `Normal GRAVITY`: build Sewing automatically,
+  advance with 0 or 9.81 m/s², and restore separate parts.
+
+State and deformation `Lock` are independent part attributes. `Lock` changes the
+selected parts' single deformation flag. `Auto` is a colored on/off control and
+is on after every successful Load. Load and switching Auto on perform an explicit
+Auto-lock operation that locks placed and done parts and unlocks pending parts.
+Switching Auto off unlocks all non-placed parts. Placed parts remain outside the
+runtime regardless of their Lock value.
 
 A short status message appears below the actions. Solver tuning and silhouette
 export are intentionally absent from this production panel.
@@ -246,7 +252,7 @@ export are intentionally absent from this production panel.
 `Load` validates the path, starts the external parser, and returns control to
 Blender immediately. Repeated activation while a parse is running is rejected.
 On success Blender validates and reads the fixed JSON document automatically,
-then creates the mesh described in section 10. On failure it displays the parser
+then creates the mesh described in section 10 and enables Auto lock. On failure it displays the parser
 diagnostic and leaves the previous JSON untouched.
 
 ## 10. Initial Blender mesh
@@ -306,6 +312,9 @@ Expanded panels are packed horizontally without overlap:
 - flat-panel face normals point toward world `-Y`; tube normals point outward.
 
 The original PDF panel-to-panel offsets are not used for this initial packing.
+Each part stores its Load matrix and starts in `PLACED`. Moving it does not skip
+states: the next GRAVITY click promotes it to `PENDING`, and its first successful
+GRAVITY step promotes it to the terminal `DONE` state.
 
 ### 10.6 Load versus Update
 
@@ -315,11 +324,14 @@ section 13. The current Update scope requires the same panel-object count and
 normalized `#` label and mirror-instance set, while triangulation and vertex
 counts may change.
 
-## 11. Sewing
+## 11. Automatic Sewing
 
-The user positions and rotates the separate part objects before pressing
-`Sewing`. Object world transforms at that moment are applied to the generated
-sewn mesh.
+The user positions and rotates the separate part objects before pressing either
+GRAVITY button. At that instant every moved `PLACED` part becomes `PENDING`, and
+its deformation Lock is cleared. Sewing then runs automatically
+from the current Object world transforms. `PENDING`
+parts are the new sewing work, `DONE` parts remain as connectivity anchors, and
+`PLACED` parts are omitted.
 
 For ordinary sewing labels, the marked boundary edges are split into connected,
 non-branching open paths and ordered by mesh topology. A label must occur on
@@ -347,20 +359,20 @@ They receive Boolean edge attributes named
 `sewing_spring_<LABEL>`. The original marked boundaries retain
 `sewing_<LABEL>`.
 
-`Sewing` creates `<collection>_SEWN`, containing all positioned parts as
-disconnected face islands plus the loose sewing edges so Yohsai can verify and
-capture cross-panel pairs. The original separate part objects are
+Automatic Sewing creates a transient `<collection>_SEWN`, containing all pending
+and completed participant parts as disconnected face islands plus the loose
+sewing edges so Yohsai can verify and capture cross-panel pairs. The original separate part objects are
 kept in the same collection but hidden in the viewport and render. No Cloth
-modifier is added in this step. Repeating `Sewing` for a collection that already
-contains a sewn mesh is an error.
+modifier is added in this step. There is no user-visible Sewing action.
 
-## 12. Kitsuke
+## 12. GRAVITY
 
-The combined `Sewing` object is a visual verification and connectivity record,
-not the persistent editing representation. On the first `Kitsuke`, Yohsai reads
+The combined Sewing object is a connectivity record, not the persistent editing
+representation. Immediately after automatic Sewing, Yohsai reads
 its loose sewing edges and the positioned source-panel vertices, snapshots the
-evaluated Body for collision, and creates a transient simulation containing all
-source panels. Later clicks reuse that live runtime. Pattern rest lengths,
+evaluated Body for collision, and creates a transient simulation containing the
+participating source panels. Later clicks without new pending parts reuse that
+live runtime. Pattern rest lengths,
 square-cell metrics, and straight warp/weft triples define the cloth's internal
 response. Paired seam vertices receive distance-independent attraction until
 they are captured at their fixed zero-length goal. Body contact uses a 0.005 m
@@ -371,7 +383,8 @@ iterations. `Zero gravity` applies no downward acceleration and `Normal gravity`
 applies 9.81 m/s². Seam targets do not change per click.
 After the calculation, positions are mapped
 back by source object and vertex index, the combined preview is removed, and
-the separate source objects are shown. The user may translate and rotate any
+the separate source objects are shown. Every pending part becomes `DONE` without
+changing its Lock, so GRAVITY can repeat immediately. The user may translate and rotate any
 selection of those objects in Object Mode before clicking again. A transformed
 part starts the next click with zero velocity; unchanged parts retain velocity.
 
@@ -383,7 +396,7 @@ constant within one live runtime.
 Exact seam pairs and fixed targets, per-vertex velocity, revision, runtime epoch,
 Object Mode matrices, and solver backend are stored in undoable Blender data
 after every committed click. Blender `undo_post` and
-`redo_post` handlers discard non-undoable live runtimes. The next Kitsuke
+`redo_post` handlers discard non-undoable live runtimes. The next GRAVITY click
 reconstructs them from the state restored by Blender. Recovery data is valid only for the current add-on
 runtime. Continuing an abandoned partially dressed session after reopening
 Blender or reloading the add-on is unsupported.
@@ -424,8 +437,9 @@ existing garment.
 The sewing signature contains normalized sewing labels, panel/segment
 membership, mirror flags, TOP coordinates, and RING segment indices, but not
 ordinary geometry coordinates. An unchanged signature preserves the verified
-Sewing state and permits direct Kitsuke. A changed signature clears verification;
-Kitsuke refuses with `Sewing required` until Sewing succeeds.
+Sewing state and permits direct GRAVITY. A changed signature clears verification;
+the next GRAVITY click rebuilds Sewing automatically from the current pending
+and completed participants.
 
 ## 14. Future compatibility
 

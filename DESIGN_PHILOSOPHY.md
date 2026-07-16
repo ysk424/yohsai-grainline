@@ -98,7 +98,7 @@ The intended rapid iteration loop is:
 2. adjust pattern size or shape in Illustrator;
 3. press `Ctrl+S` in Illustrator;
 4. press `Update` in Blender;
-5. press `Kitsuke` to settle the newly cut cloth;
+5. press a GRAVITY button to settle the newly cut cloth;
 6. repeat.
 
 The pattern path does not change. `Update` rereads the same PDF or SVG selected
@@ -117,20 +117,21 @@ For the initial Update scope:
 - all velocities reset to zero;
 - the operation is all-or-nothing.
 
-## 6. Sewing is independent and reusable
+## 6. Sewing is automatic and reusable internally
 
-`Sewing` is not an implementation detail of Load or Update. It is an independent
-construction and verification operation that can be run again whenever sewing
-connectivity changes or the user discovers a sewing mistake after dressing.
+Sewing remains a reusable connectivity engine, but it is no longer a separate
+user action. Pressing either GRAVITY button promotes moved placed parts to the
+pending state, clears the independent deformation Lock on those pending parts,
+runs Sewing immediately, and only then advances the simulation. Completing the
+step changes state only; it must not re-lock the parts.
 
 If Update preserves the verified panel labels, sewing labels, and their authored
-segment membership, the user may proceed directly to Kitsuke. If the sewing
-definition changed and the user presses Kitsuke without rebuilding Sewing,
-Yohsai must refuse and display a clear `Sewing required` warning.
+segment membership, GRAVITY may reuse that connectivity. If the sewing
+definition changed, the next GRAVITY click rebuilds it automatically from the
+pending and completed participant parts.
 
-The reusable sewing engine and the user-visible Sewing verification action may
-share code, but their responsibilities must remain explicit. No component should
-silently guess or approve changed sewing connectivity.
+Automatic invocation does not authorize guessing. Ambiguous or invalid sewing
+connectivity must still cancel the GRAVITY click with a clear error.
 
 ## 7. Kitsuke is incremental dressing
 
@@ -200,8 +201,8 @@ must be added as pattern concepts rather than borrowed uncritically from a 3D
 tool taxonomy.
 
 The Blender interface follows the same restraint. The normal N-panel groups its
-few inputs first and presents the construction sequence as `Load`, `Update`,
-`Sewing`, and `Kitsuke`. One-time character preparation and engineering tuning
+few inputs first and presents `Load`, `Update`, and the two GRAVITY choices;
+Sewing is automatic. One-time character preparation and engineering tuning
 do not belong among those daily actions. Occasional preparation such as
 silhouette export lives in documented Scripting utilities instead.
 
@@ -218,7 +219,7 @@ workflow:
 5. repeat placement and Kitsuke until dressed.
 
 Bone hints such as `@Bupper arm` can assist this process, but they are deferred
-until the manual construction, Update, Sewing, and Kitsuke workflows are
+until the manual construction, Update, automatic Sewing, and GRAVITY workflows are
 complete and reliable.
 
 ## 11. Anti-drift checklist
@@ -232,7 +233,7 @@ Before implementing a garment feature, ask:
 4. Can the operation be expressed with Bezier geometry and a short annotation?
 5. Are ambiguous or unsupported construction changes rejected clearly instead
    of guessed?
-6. Does the design keep Sewing, Update, and Kitsuke independently reusable?
+6. Does the design keep automatic Sewing, Update, and GRAVITY internally reusable?
 
 If the answers begin from mesh identity rather than pattern intent, reconsider
 the design before writing code.

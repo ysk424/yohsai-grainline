@@ -103,9 +103,9 @@ try:
     parts[0].location.y += 0.03
     parts[1].location.x += 0.001
     bpy.context.view_layer.update()
+    mesh_loader.mark_moved_parts_pending(collection)
     assert mesh_loader.participating_parts(collection) == tuple(parts)
-    sewing_result = bpy.ops.yohsai.sewing()
-    assert sewing_result == {"FINISHED"}, bpy.context.scene.yohsai.parse_status
+    mesh_loader.create_sewn_mesh(bpy.context, collection)
     sewn = bpy.data.objects["CLOTHES_001_SEWN"]
     sewn_mesh = sewn.data
     assert len(collection.objects) == 3
@@ -135,12 +135,11 @@ try:
     sewn_face_count = len(sewn_mesh.polygons)
 
     try:
-        duplicate_sewing = bpy.ops.yohsai.sewing()
-    except RuntimeError as exc:
+        mesh_loader.create_sewn_mesh(bpy.context, collection)
+    except mesh_loader.SewingError as exc:
         assert "already has a sewn mesh" in str(exc)
     else:
-        assert duplicate_sewing == {"CANCELLED"}
-    assert "already has a sewn mesh" in bpy.context.scene.yohsai.parse_status
+        raise AssertionError("A duplicate internal Sewing preview was accepted")
 
     # Kitsuke uses the verified sewn preview only as transient connectivity,
     # advances a fixed interval, then restores the separate editable parts.
@@ -300,7 +299,8 @@ try:
         assert all("yohsai_pattern_position" in obj.data.attributes for obj in update_parts)
         for obj in update_parts:
             obj.location.x += 0.001
-        assert bpy.ops.yohsai.sewing() == {"FINISHED"}
+        mesh_loader.mark_moved_parts_pending(update_collection)
+        mesh_loader.create_sewn_mesh(bpy.context, update_collection)
         assert bool(update_collection["yohsai_sewing_verified"])
         assert bpy.ops.yohsai.kitsuke_zero_gravity() == {"FINISHED"}
         assert "gravity -Z 0" in bpy.context.scene.yohsai.parse_status
@@ -335,15 +335,8 @@ try:
         kitsuke_module.clear_kitsuke_session(update_collection)
         assert sewing_changed
         assert not bool(update_collection["yohsai_sewing_verified"])
-        try:
-            rejected_kitsuke = bpy.ops.yohsai.kitsuke()
-        except RuntimeError as exc:
-            assert "Sewing required" in str(exc)
-        else:
-            assert rejected_kitsuke == {"CANCELLED"}
-        assert "Sewing required" in bpy.context.scene.yohsai.parse_status
-        assert bpy.ops.yohsai.sewing() == {"FINISHED"}
         assert bpy.ops.yohsai.kitsuke() == {"FINISHED"}
+        assert bool(update_collection["yohsai_sewing_verified"])
 
         mesh_pointers = [obj.data.as_pointer() for obj in update_parts]
         wrong_labels_svg = changed_sewing_svg.replace("#back-01", "#back-02")

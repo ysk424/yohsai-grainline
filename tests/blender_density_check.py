@@ -112,7 +112,8 @@ try:
 
     for obj in parts:
         obj.location.x += 0.001
-    assert bpy.ops.yohsai.sewing() == {"FINISHED"}
+    mesh_loader.mark_moved_parts_pending(collection)
+    mesh_loader.create_sewn_mesh(bpy.context, collection)
     sewn = next(obj for obj in collection.objects if obj.get("yohsai_role") == "sewn")
     spring_edges = {
         edge_index

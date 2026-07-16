@@ -28,6 +28,15 @@ GRAINLINE_EDGE_WEFT = 2
 GRAINLINE_EDGE_TRANSITION = 3
 LOAD_MATRIX_KEY = "yohsai_load_matrix"
 LOCKED_OBJECT_KEY = "yohsai_kitsuke_locked"
+GRAVITY_STATE_KEY = "yohsai_gravity_state"
+GRAVITY_STATE_PLACED = "PLACED"
+GRAVITY_STATE_PENDING = "PENDING"
+GRAVITY_STATE_DONE = "DONE"
+GRAVITY_STATES = frozenset((
+    GRAVITY_STATE_PLACED,
+    GRAVITY_STATE_PENDING,
+    GRAVITY_STATE_DONE,
+))
 _PLACEMENT_TOLERANCE = 1.0e-6
 
 
@@ -62,8 +71,69 @@ def part_moved_from_load(obj: bpy.types.Object) -> bool:
     )
 
 
+def part_gravity_state(obj: bpy.types.Object) -> str:
+    """Return a part's monotonic placement -> pending -> done state."""
+    state = str(obj.get(GRAVITY_STATE_KEY, ""))
+    if state in GRAVITY_STATES:
+        return state
+
+    # Migrate files saved before the three-state workflow.  An old Auto-locked
+    # moved part has already completed a simulation step; other moved parts are
+    # waiting for their first Gravity click.
+    if not part_moved_from_load(obj):
+        state = GRAVITY_STATE_PLACED
+    elif bool(obj.get(LOCKED_OBJECT_KEY, False)):
+        state = GRAVITY_STATE_DONE
+    else:
+        state = GRAVITY_STATE_PENDING
+    obj[GRAVITY_STATE_KEY] = state
+    return state
+
+
+def mark_moved_parts_pending(collection: bpy.types.Collection | None) -> tuple[bpy.types.Object, ...]:
+    """Advance moved placement-state parts to pending and return all pending parts."""
+    if collection is None:
+        return ()
+    pending: list[bpy.types.Object] = []
+    for obj in collection.objects:
+        if obj.type != "MESH" or obj.get("yohsai_role") != "part":
+            continue
+        state = part_gravity_state(obj)
+        if state == GRAVITY_STATE_PLACED and part_moved_from_load(obj):
+            state = GRAVITY_STATE_PENDING
+            obj[GRAVITY_STATE_KEY] = state
+        if state == GRAVITY_STATE_PENDING:
+            # Lock is an independent deformation attribute.  The GRAVITY event
+            # explicitly unlocks every pending part without deriving future
+            # lock values from its state.
+            obj[LOCKED_OBJECT_KEY] = False
+            pending.append(obj)
+    return tuple(sorted(pending, key=lambda obj: int(obj.get("yohsai_panel_index", 0))))
+
+
+def mark_pending_parts_done(parts: Iterable[bpy.types.Object]) -> None:
+    """Advance successfully simulated pending parts to the terminal done state."""
+    for obj in parts:
+        if part_gravity_state(obj) == GRAVITY_STATE_PENDING:
+            obj[GRAVITY_STATE_KEY] = GRAVITY_STATE_DONE
+
+
+def apply_auto_lock(collection: bpy.types.Collection | None, enabled: bool) -> None:
+    """Apply the explicit Auto-button lock operation without changing states."""
+    if collection is None:
+        return
+    for obj in collection.objects:
+        if obj.type != "MESH" or obj.get("yohsai_role") != "part":
+            continue
+        state = part_gravity_state(obj)
+        if enabled:
+            obj[LOCKED_OBJECT_KEY] = state in (GRAVITY_STATE_PLACED, GRAVITY_STATE_DONE)
+        elif state != GRAVITY_STATE_PLACED:
+            obj[LOCKED_OBJECT_KEY] = False
+
+
 def participating_parts(collection: bpy.types.Collection) -> tuple[bpy.types.Object, ...]:
-    """Return Load-moved parts plus parts committed by Auto/Lock."""
+    """Return pending parts and completed parts retained as sewing anchors."""
     return tuple(sorted(
         (
             obj
@@ -71,7 +141,7 @@ def participating_parts(collection: bpy.types.Collection) -> tuple[bpy.types.Obj
             if (
                 obj.type == "MESH"
                 and obj.get("yohsai_role") == "part"
-                and (part_moved_from_load(obj) or bool(obj.get(LOCKED_OBJECT_KEY, False)))
+                and part_gravity_state(obj) != GRAVITY_STATE_PLACED
             )
         ),
         key=lambda obj: int(obj.get("yohsai_panel_index", 0)),
@@ -938,7 +1008,8 @@ def create_clothes_mesh(context, document: dict[str, Any]) -> bpy.types.Collecti
         context.view_layer.update()
         for obj in created_objects:
             obj[LOAD_MATRIX_KEY] = list(_matrix_tuple(obj.matrix_world))
-            obj[LOCKED_OBJECT_KEY] = False
+            obj[GRAVITY_STATE_KEY] = GRAVITY_STATE_PLACED
+            obj[LOCKED_OBJECT_KEY] = True
 
         for selected in context.selected_objects:
             selected.select_set(False)
@@ -1033,7 +1104,8 @@ def _transfer_deformation(obj: bpy.types.Object, panel: PanelGeometry) -> list[V
     return transferred
 
 
-def _remove_sewn_preview(collection: bpy.types.Collection) -> None:
+def remove_sewn_preview(collection: bpy.types.Collection, reveal_parts: bool = False) -> None:
+    """Remove transient Sewing meshes, optionally restoring their source parts."""
     for obj in list(collection.objects):
         if obj.get("yohsai_role") != "sewn":
             continue
@@ -1041,6 +1113,11 @@ def _remove_sewn_preview(collection: bpy.types.Collection) -> None:
         bpy.data.objects.remove(obj, do_unlink=True)
         if mesh.users == 0:
             bpy.data.meshes.remove(mesh)
+    if reveal_parts:
+        for obj in collection.objects:
+            if obj.type == "MESH" and obj.get("yohsai_role") == "part":
+                obj.hide_set(False)
+                obj.hide_render = False
 
 
 def update_clothes_mesh(context, collection: bpy.types.Collection, document: dict[str, Any]) -> tuple[bool, int]:
@@ -1121,7 +1198,7 @@ def update_clothes_mesh(context, collection: bpy.types.Collection, document: dic
         obj["yohsai_ring_closed"] = panel.ring_closed
         obj.hide_set(False)
         obj.hide_render = False
-    _remove_sewn_preview(collection)
+    remove_sewn_preview(collection)
     for mesh in old_meshes:
         if mesh.users == 0:
             bpy.data.meshes.remove(mesh)
@@ -1496,7 +1573,7 @@ def build_sewing_plan(collection: bpy.types.Collection) -> SewingPlan:
     parts = participating_parts(collection)
     if len(parts) < 2:
         raise SewingError(
-            "Sewing needs at least two parts moved from their Load positions or locked by Auto."
+            "GRAVITY needs at least two pending or completed parts with a resolvable sewing connection."
         )
     all_parts = tuple(
         obj
@@ -1562,7 +1639,7 @@ def build_sewing_plan(collection: bpy.types.Collection) -> SewingPlan:
             connections.append((label, a, b))
     if not resolved_labels:
         raise SewingError(
-            "The moved or Auto-locked parts contain no resolvable sewing group yet."
+            "The pending parts and their completed sewing anchors contain no resolvable sewing group yet."
         )
     return SewingPlan(parts, tuple(resolved_labels), tuple(connections))
 

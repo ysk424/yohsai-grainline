@@ -54,7 +54,6 @@ try:
     for obj in collection.objects:
         if obj.get("yohsai_role") == "part":
             obj.location.x += 0.001
-    assert bpy.ops.yohsai.sewing() == {"FINISHED"}
     assert bpy.ops.yohsai.kitsuke() == {"FINISHED"}
 
     session = kitsuke._sessions[collection.as_pointer()]

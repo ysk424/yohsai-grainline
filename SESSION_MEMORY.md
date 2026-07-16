@@ -1,16 +1,26 @@
 # Yohsai Session Memory
 
-Recorded: 2026-07-16 (Asia/Tokyo)
+Recorded: 2026-07-17 (Asia/Tokyo)
 
 ## Current contract
 
-- Sewing supplies exact seam connectivity only.
-- Load records every part's initial Object Mode matrix. Parts that remain there
-  are excluded from Sewing and Kitsuke; moved or Auto-locked parts participate.
+- Sewing supplies exact seam connectivity only and is invoked automatically by
+  a GRAVITY button rather than exposed as a separate action.
+- State and the single deformation Lock are independent per-part attributes.
+  Parts progress monotonically from `PLACED` to `PENDING` to `DONE`. Load stores
+  the initial Object Mode matrix; a moved placed part becomes pending at the
+  next GRAVITY click, and a successful step makes pending parts done.
+- Placed parts are excluded from Sewing and GRAVITY. Pending parts are the new
+  Sewing work and have their Lock cleared at the GRAVITY click; done parts
+  remain as connectivity anchors.
 - Unresolvable sewing paths remain pending. Adding one sleeve resolves that
   side of a multipart `C` group without waiting for the other sleeve.
-- Auto locks exactly the parts completed by the latest Kitsuke step, clears the
-  transient session, and starts the next incremental Sewing stage.
+- Load enables and explicitly applies Auto, locking placed and done parts and
+  unlocking pending parts. Switching Auto off unlocks non-placed parts;
+  switching it on explicitly applies Auto again.
+- GRAVITY completion changes pending parts to done without changing Lock, so
+  the same unlocked parts can receive repeated GRAVITY.
+- The Lock check directly changes the selected parts' single Lock attribute.
 - Kitsuke starts from positioned source-panel vertices.
 - Seam targets are fixed at zero and never shorten per click.
 - Before 2 mm capture, seam closure is a fixed distance per substep, independent
@@ -96,8 +106,8 @@ material terms only; the garment scene remains the real check.
 
 ## Release
 
-Current release: `yohsai-0.6.0.zip`, the beginner-facing incremental dressing
-release. Its exact size and SHA-256 are reported alongside the built artifact so
+Current release: `yohsai-0.6.4.zip`, the independent state/Lock GRAVITY release.
+Its exact size and SHA-256 are reported alongside the built artifact so
 this packaged document does not contain a self-invalidating archive hash.
 
 The archive contains 32 entries and its bundled native DLL matches
@@ -106,6 +116,5 @@ native binaries, licenses, and current documentation. Exclude build output,
 caches, temporary parser output, local PDFs, and older archives from future
 ZIPs.
 
-The Taichi backend is no longer product-selectable or bundled. The release uses
-only the native Square-Lattice solver, avoiding an unused roughly 83 MB wheel
-and a second solver that would need to be kept behaviorally synchronized.
+The release bundles only the native Square-Lattice solver and the PDF parser
+wheel.

@@ -4,14 +4,14 @@ Status: current square-lattice cloth contract
 
 ## Purpose
 
-Kitsuke advances the separately positioned pattern parts after Sewing records
-exact cross-panel vertex pairs. It must not infer garment fit, volume, intended
+GRAVITY advances the separately positioned pattern parts after its automatic
+Sewing phase records exact cross-panel vertex pairs. It must not infer garment fit, volume, intended
 Body-relative placement, or a Body-shaped rest curvature.
 
 ## Initial state
 
-The first click starts from the current world-space vertices of the source part
-objects. The Sewing preview supplies connectivity only. Pattern attributes
+The first click of a pending stage starts from the current world-space vertices
+of the source part objects. The transient Sewing preview supplies connectivity only. Pattern attributes
 supply the intrinsic material metric. Body geometry defines neither initial
 positions nor material rest state.
 
@@ -73,13 +73,23 @@ Moving or rotating a part between clicks replaces that part's positions and
 clears its velocity. Scaling and vertex-count changes are rejected. Lock keeps
 seam and material connectivity but prevents the locked vertices from moving.
 
-Load stores each part's initial Object Mode matrix. Sewing and Kitsuke omit
-parts that still have that matrix, while Auto-locked parts stay in connectivity
-as fixed vertices. Auto locks exactly the parts written by the latest completed
-Kitsuke step, clears that transient session, and requires a new Sewing action
-before the next Kitsuke stage. Unresolvable paths remain pending. A newly moved
-part resolves every valid connection available among the current participants,
-including one side of a multipart label whose other side is still unmoved.
+Load stores each part's initial Object Mode matrix and initializes its monotonic
+state as `PLACED`. At a GRAVITY click, a placed part whose Object Mode matrix has
+changed becomes `PENDING`. Automatic Sewing uses pending parts as the new work,
+retains `DONE` parts as possible sewing anchors, and omits placed parts. A
+GRAVITY click clears the independent deformation Lock from all pending parts
+before Sewing, so each pending part is deformable. A successful simulation
+changes every pending participant to `DONE` and does not change its Lock.
+
+State and Lock are separate per-part attributes. Auto is an explicit lock
+operation, not a continuously derived policy. Load turns Auto on and applies it:
+placed and done parts become locked, while pending parts become unlocked.
+Switching Auto off unlocks non-placed parts; switching it on applies the same
+Auto-lock operation again. `Lock` directly changes the selected parts' single
+deformation Lock. Placed parts remain outside the runtime regardless of Lock.
+Unresolvable paths remain pending. A newly moved part resolves every valid
+connection available among the current participants, including one side of a
+multipart label whose other side is still placed.
 
 Undoable state stores seam pairs, the fixed seam state, velocity, revision,
 backend, runtime epoch, and Object Mode matrices. Recovery is limited to the
