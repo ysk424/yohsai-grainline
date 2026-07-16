@@ -374,17 +374,22 @@ void Solver::project_edge(const Edge& edge) {
         vertices_[static_cast<size_t>(edge.b)].position -
         vertices_[static_cast<size_t>(edge.a)].position;
     const float current_length = length(difference);
-    const float maximum_length = edge.rest_length * (1.0F + config_.stretch_limit);
-    if (current_length > maximum_length) {
-        // The crimp reserve is spent; the yarn itself does not elongate.
-        project_distance(edge.a, edge.b, maximum_length, 1.0F);
-        return;
-    }
-    if (current_length > edge.rest_length) {
-        project_distance(edge.a, edge.b, edge.rest_length, config_.stretch_relaxation);
-    }
-    // Below the rest length the span buckles out of plane instead of resisting,
-    // which is what lets the cloth fold.
+    // Both directions.  A yarn does not elongate, and the centimetre between two
+    // crossings does not shorten either: cloth folds by bending the lattice out
+    // of plane, with its cells still a centimetre across.  Letting a span
+    // collapse instead makes compression a one-way ratchet that no later pass
+    // can undo, and the panel silently loses its authored dimensions.
+    const float slack = edge.rest_length * config_.stretch_limit;
+    const bool beyond_crimp_reserve =
+        current_length > edge.rest_length + slack || current_length < edge.rest_length - slack;
+    // Always aim at the rest length; only the firmness changes.  Aiming at the
+    // reserve bound instead would leave a span just past it stretched further
+    // than one just inside it.
+    project_distance(
+        edge.a,
+        edge.b,
+        edge.rest_length,
+        beyond_crimp_reserve ? 1.0F : config_.stretch_relaxation);
 }
 
 void Solver::project_edges(bool reverse) {
@@ -663,7 +668,15 @@ ysc_stats Solver::advance(const ysc_advance_desc& desc) {
             project_bends(reverse);
             // Keep the material edges last: shear and curvature may rearrange a
             // cell, but they must never leave its warp/weft span torn open.
+            // These sweeps repeat because a Gauss-Seidel pass carries a length
+            // correction only about one span further into the sheet, so a single
+            // pass per iteration leaves the middle of a panel — the part
+            // furthest from any anchor — never reached, and the lattice grows
+            // instead of settling onto its authored spacing.
             project_edges(reverse);
+            project_edges(!reverse);
+            project_edges(reverse);
+            project_edges(!reverse);
             project_body_contacts(desc.body_candidates, desc.body_candidate_count);
         }
         finish_substep(config_.time_step);

@@ -21,12 +21,25 @@ normals, bones, and the current Body silhouette never define cloth rest data.
 
 ## Material energy
 
-Warp, weft, and boundary-transition edges preserve their authored lengths. An
-edge resists extension only: past `stretch_limit` of its rest length it is a
-hard wall, between rest and that ceiling it is pulled back, and below rest
-length it does not resist at all, so the span buckles out of plane into a fold
-instead of behaving like a rod in compression. The ceiling is the weave's crimp
-reserve, not yarn elongation, so it is small and absolute.
+Warp, weft, and boundary-transition edges preserve their authored lengths in
+both directions. Every sweep aims at the rest length; only the firmness varies.
+Within `stretch_limit` of rest the pull is `stretch_relaxation`, the weave's own
+crimp give; outside it the pull is total. Aiming at the bound rather than at
+rest would leave a span just past the reserve stretched further than one just
+inside it.
+
+Compression is resisted as firmly as extension. A yarn does not elongate, and
+the centimetre between two crossings does not shorten either: cloth folds by
+bending the lattice out of plane, with its cells still a centimetre across.
+Letting a span collapse instead makes compression a one-way ratchet, because a
+span shorter than rest would never be visited again, and the panel silently
+loses the dimensions the pattern authored.
+
+Because a Gauss-Seidel pass carries a length correction only about one span
+further into the sheet, the edge sweeps repeat within each iteration. A single
+pass per iteration never reaches the middle of a panel, which is the part
+furthest from any anchor, and the lattice then grows under load instead of
+settling onto its authored spacing.
 
 For an ordered quad `(x0, x1, x2, x3)`, the averaged material spans are
 
