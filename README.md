@@ -53,6 +53,11 @@ Sewing uses the world-space positions of the separate source parts. It orders
 marked boundary paths, matches them by normalized authored distance, and stores
 cross-panel pairs as loose preview edges.
 
+Load records every part's initial Object Mode transform. Sewing ignores parts
+that remain at that transform and includes only moved parts plus parts committed
+by Auto. Unresolvable paths stay pending; when a moved part completes one side
+of a multipart sewing group, that side is sewn without waiting for later parts.
+
 The preview is a visual connectivity record. It does not define a replacement
 initial cloth shape. Body geometry is not used by Sewing.
 
@@ -82,6 +87,11 @@ After a click, positions are scattered back to the separate part objects. Object
 translation and rotation are supported between clicks; scaling and vertex-count
 changes are rejected. Finite movement is not capped or rolled back; rollback is
 reserved for a non-finite solver state.
+
+Auto commits the parts written by the latest successful Kitsuke click. It locks
+those parts against further deformation, ends that live session, and makes the
+next moved part eligible for a new Sewing/Kitsuke stage. Repeating this cycle
+adds pattern parts incrementally while earlier parts retain seam connectivity.
 
 Undo and Redo store the solver state needed to reconstruct the live session
 inside the same add-on runtime. Continuing a partially dressed session after

@@ -73,6 +73,14 @@ Moving or rotating a part between clicks replaces that part's positions and
 clears its velocity. Scaling and vertex-count changes are rejected. Lock keeps
 seam and material connectivity but prevents the locked vertices from moving.
 
+Load stores each part's initial Object Mode matrix. Sewing and Kitsuke omit
+parts that still have that matrix, while Auto-locked parts stay in connectivity
+as fixed vertices. Auto locks exactly the parts written by the latest completed
+Kitsuke step, clears that transient session, and requires a new Sewing action
+before the next Kitsuke stage. Unresolvable paths remain pending. A newly moved
+part resolves every valid connection available among the current participants,
+including one side of a multipart label whose other side is still unmoved.
+
 Undoable state stores seam pairs, the fixed seam state, velocity, revision,
 backend, runtime epoch, and Object Mode matrices. Recovery is limited to the
 current add-on runtime. A click is rolled back only if the returned particle

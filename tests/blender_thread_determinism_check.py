@@ -51,6 +51,9 @@ try:
         bpy.ops.mesh.primitive_cube_add(size=1.0, location=(100.0, 100.0, 100.0))
     bpy.context.scene.yohsai.body_object = bpy.context.object
 
+    for obj in collection.objects:
+        if obj.get("yohsai_role") == "part":
+            obj.location.x += 0.001
     assert bpy.ops.yohsai.sewing() == {"FINISHED"}
     assert bpy.ops.yohsai.kitsuke() == {"FINISHED"}
 

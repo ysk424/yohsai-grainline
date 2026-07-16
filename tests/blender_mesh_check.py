@@ -62,6 +62,8 @@ try:
         labels = [obj["yohsai_panel_label"] for obj in parts]
         assert labels[0].startswith("OMOTE") and labels[1].startswith("URA"), labels
     assert all(obj.type == "MESH" and obj.get("yohsai_role") == "part" for obj in parts)
+    assert not mesh_loader.participating_parts(collection)
+    assert all(mesh_loader.LOAD_MATRIX_KEY in obj for obj in parts)
     assert all(len(obj.modifiers) == 0 for obj in parts)
     assert sum(len(obj.data.vertices) for obj in parts) > 100
     assert sum(len(obj.data.polygons) for obj in parts) > 100
@@ -99,6 +101,9 @@ try:
     # Sewing uses the parts' current world transforms, keeps them as hidden
 # sources, and creates loose spring edges in one combined verification mesh.
     parts[0].location.y += 0.03
+    parts[1].location.x += 0.001
+    bpy.context.view_layer.update()
+    assert mesh_loader.participating_parts(collection) == tuple(parts)
     sewing_result = bpy.ops.yohsai.sewing()
     assert sewing_result == {"FINISHED"}, bpy.context.scene.yohsai.parse_status
     sewn = bpy.data.objects["CLOTHES_001_SEWN"]
@@ -289,6 +294,8 @@ try:
         )
         assert [obj["yohsai_panel_label"] for obj in update_parts] == ["FRONT01", "BACK-01"]
         assert all("yohsai_pattern_position" in obj.data.attributes for obj in update_parts)
+        for obj in update_parts:
+            obj.location.x += 0.001
         assert bpy.ops.yohsai.sewing() == {"FINISHED"}
         assert bool(update_collection["yohsai_sewing_verified"])
         bpy.context.scene.yohsai.kitsuke_gravity = 0.0

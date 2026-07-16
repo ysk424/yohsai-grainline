@@ -56,6 +56,9 @@ try:
     body = bpy.context.object
     bpy.context.scene.yohsai.body_object = body
 
+    for obj in collection.objects:
+        if obj.get("yohsai_role") == "part":
+            obj.location.x += 0.001
     bpy.ops.ed.undo_push(message="Yohsai Undo test initial state")
     assert bpy.ops.yohsai.sewing() == {"FINISHED"}
     bpy.ops.ed.undo_push(message="Yohsai Undo test Sewing")

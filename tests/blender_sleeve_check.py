@@ -104,6 +104,32 @@ assert vertex_count == sum(len(obj.data.vertices) for obj in parts)
 assert [obj.as_pointer() for obj in parts] == object_pointers
 assert [obj["yohsai_panel_instance"] for obj in parts] == ["OMOTE", "URA", "SODE:LEFT", "SODE:RIGHT"]
 
+for obj in body:
+    obj.location.x += 0.001
+bpy.context.view_layer.update()
+body_plan = mesh_loader.build_sewing_plan(collection)
+assert body_plan.parts == tuple(body)
+assert body_plan.labels == ("A", "B")
+
+sleeves[0].location.x += 0.001
+bpy.context.view_layer.update()
+left_sleeve_plan = mesh_loader.build_sewing_plan(collection)
+assert left_sleeve_plan.parts == tuple(parts[:3])
+assert left_sleeve_plan.labels == ("A", "B", "C")
+left_offsets = {}
+offset = 0
+for obj in left_sleeve_plan.parts:
+    left_offsets[obj] = range(offset, offset + len(obj.data.vertices))
+    offset += len(obj.data.vertices)
+left_sleeve_range = left_offsets[sleeves[0]]
+left_c_connections = [
+    (a, b) for label, a, b in left_sleeve_plan.connections if label == "C"
+]
+assert left_c_connections
+assert all(a in left_sleeve_range or b in left_sleeve_range for a, b in left_c_connections)
+
+sleeves[1].location.x += 0.001
+bpy.context.view_layer.update()
 plan = mesh_loader.build_sewing_plan(collection)
 assert plan.labels == ("A", "B", "C")
 c_connections = [(a, b) for label, a, b in plan.connections if label == "C"]
@@ -143,5 +169,6 @@ finally:
 print(
     "YOHSAI_SLEEVE_OK "
     f"parts={len(parts)} sleeve_C={sleeve_c[0]:.6f} body_C={body_c_per_side:.6f} "
-    f"connections={len(c_connections)} cosserat_drift={ring_drift:.6g}"
+    f"partial_connections={len(left_c_connections)} connections={len(c_connections)} "
+    f"cosserat_drift={ring_drift:.6g}"
 )

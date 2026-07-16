@@ -19,6 +19,7 @@ from .mesh_loader import (
     GRAINLINE_EDGE_WARP,
     GRAINLINE_EDGE_WEFT,
     GRAINLINE_FACE_QUAD_ATTRIBUTE,
+    LOCKED_OBJECT_KEY,
     SewingError,
     build_sewing_plan,
 )
@@ -49,8 +50,8 @@ _STATE_SEAMS_KEY = "yohsai_kitsuke_seams"
 _STATE_SEAM_REST_KEY = "yohsai_kitsuke_seam_rest"
 _STATE_MATRIX_KEY = "yohsai_kitsuke_matrix"
 _STATE_BACKEND_KEY = "yohsai_kitsuke_backend"
+_STATE_PARTS_KEY = "yohsai_kitsuke_parts"
 _VELOCITY_ATTRIBUTE = "yohsai_kitsuke_velocity"
-LOCKED_OBJECT_KEY = "yohsai_kitsuke_locked"
 _RUNTIME_EPOCH = uuid4().hex
 
 
@@ -186,7 +187,14 @@ def _write_velocity_state(part: _PartRange, velocities: np.ndarray) -> None:
 
 
 def _clear_persisted_state(collection: bpy.types.Collection) -> None:
-    for key in (_STATE_EPOCH_KEY, _STATE_REVISION_KEY, _STATE_SEAMS_KEY, _STATE_SEAM_REST_KEY, _STATE_BACKEND_KEY):
+    for key in (
+        _STATE_EPOCH_KEY,
+        _STATE_REVISION_KEY,
+        _STATE_SEAMS_KEY,
+        _STATE_SEAM_REST_KEY,
+        _STATE_BACKEND_KEY,
+        _STATE_PARTS_KEY,
+    ):
         if key in collection:
             del collection[key]
     for obj in _parts(collection):
@@ -856,9 +864,10 @@ def _create_runtime_type(ti):
 
 class _KitsukeSession:
     def __init__(self, context, collection, body, preview, backend: str):
-        objects = _parts(collection)
-        if len(objects) < 2:
-            raise KitsukeError("Kitsuke needs at least two cloth objects.")
+        try:
+            objects = list(build_sewing_plan(collection).parts)
+        except SewingError as exc:
+            raise KitsukeError(f"Sewing required: {exc}") from exc
         ranges: list[_PartRange] = []
         position_blocks: list[np.ndarray] = []
         locked_blocks: list[np.ndarray] = []
@@ -991,6 +1000,7 @@ class _KitsukeSession:
         self.collection[_STATE_REVISION_KEY] = self.revision
         self.collection[_STATE_EPOCH_KEY] = _RUNTIME_EPOCH
         self.collection[_STATE_BACKEND_KEY] = self.backend
+        self.collection[_STATE_PARTS_KEY] = [part.obj.name for part in self.parts]
 
     def advance(self, context, gravity_magnitude: float, solver_iterations: int):
         self._read_user_transforms()
@@ -1107,6 +1117,20 @@ def clear_kitsuke_session(collection: bpy.types.Collection | None) -> None:
             if close is not None:
                 close()
         _clear_persisted_state(collection)
+
+
+def completed_kitsuke_parts(collection: bpy.types.Collection | None) -> list[bpy.types.Object]:
+    """Return only the parts written by the most recently completed Kitsuke step."""
+    if collection is None:
+        return []
+    session = _sessions.get(collection.as_pointer())
+    if session is not None and session.revision > 0:
+        return [part.obj for part in session.parts]
+    if not _persisted_state_is_current(collection):
+        return []
+    names = [str(name) for name in collection.get(_STATE_PARTS_KEY, [])]
+    parts = {obj.name: obj for obj in _parts(collection)}
+    return [parts[name] for name in names if name in parts]
 
 
 def has_kitsuke_session(collection: bpy.types.Collection | None) -> bool:

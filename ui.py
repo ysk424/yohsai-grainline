@@ -28,6 +28,7 @@ from .kitsuke import (
     advance_kitsuke,
     clear_kitsuke_session,
     clear_sessions,
+    completed_kitsuke_parts,
     has_kitsuke_session,
     reset_runtime_epoch,
 )
@@ -316,14 +317,43 @@ class YohsaiProperties(PropertyGroup):
 class YOHSAI_OT_lock_auto(Operator):
     bl_idname = "yohsai.lock_auto"
     bl_label = "Auto"
-    bl_description = "Automatic Lock selection is reserved for a later implementation"
+    bl_description = "Lock the parts completed by Kitsuke and start the next incremental Sewing stage"
+    bl_options = {"REGISTER", "UNDO"}
 
     @classmethod
     def poll(cls, context):
-        return False
+        if context.mode != "OBJECT" or not hasattr(context.scene, "yohsai"):
+            return False
+        return bool(completed_kitsuke_parts(context.scene.yohsai.clothes_collection))
 
     def execute(self, context):
-        return {"CANCELLED"}
+        props = context.scene.yohsai
+        collection = props.clothes_collection
+        parts = completed_kitsuke_parts(collection)
+        if not parts:
+            message = "Run Kitsuke successfully before using Auto."
+            props.parse_status = f"Auto failed: {message}"
+            self.report({"ERROR"}, message)
+            return {"CANCELLED"}
+
+        for obj in parts:
+            obj[LOCKED_OBJECT_KEY] = True
+        clear_kitsuke_session(collection)
+        collection["yohsai_sewing_verified"] = False
+
+        for selected in context.selected_objects:
+            selected.select_set(False)
+        for obj in parts:
+            obj.hide_set(False)
+            obj.hide_render = False
+            obj.select_set(True)
+        context.view_layer.objects.active = parts[0]
+        context.view_layer.update()
+
+        message = f"Auto locked {len(parts)} dressed part(s); move the next part, then run Sewing."
+        props.parse_status = message
+        self.report({"INFO"}, message)
+        return {"FINISHED"}
 
 
 class YOHSAI_OT_load_svg(Operator):

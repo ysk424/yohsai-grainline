@@ -110,6 +110,8 @@ try:
             for grid_x, grid_y in grid_coordinates
         )
 
+    for obj in parts:
+        obj.location.x += 0.001
     assert bpy.ops.yohsai.sewing() == {"FINISHED"}
     sewn = next(obj for obj in collection.objects if obj.get("yohsai_role") == "sewn")
     spring_edges = {

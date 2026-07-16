@@ -26,6 +26,9 @@ GRAINLINE_EDGE_PROXY = 0
 GRAINLINE_EDGE_WARP = 1
 GRAINLINE_EDGE_WEFT = 2
 GRAINLINE_EDGE_TRANSITION = 3
+LOAD_MATRIX_KEY = "yohsai_load_matrix"
+LOCKED_OBJECT_KEY = "yohsai_kitsuke_locked"
+_PLACEMENT_TOLERANCE = 1.0e-6
 
 
 class MeshLoadError(ValueError):
@@ -38,6 +41,41 @@ class SewingError(ValueError):
 
 class UpdateError(ValueError):
     """A revised pattern cannot atomically replace the current panel meshes."""
+
+
+def _matrix_tuple(matrix) -> tuple[float, ...]:
+    return tuple(float(value) for row in matrix for value in row)
+
+
+def part_moved_from_load(obj: bpy.types.Object) -> bool:
+    """Return whether a part's Object Mode transform differs from its Load pose."""
+    try:
+        loaded = tuple(float(value) for value in obj[LOAD_MATRIX_KEY])
+    except (KeyError, TypeError, ValueError):
+        # Blend files created before placement tracking retain the old behavior:
+        # their parts remain eligible instead of becoming unusable.
+        return True
+    current = _matrix_tuple(obj.matrix_world)
+    return len(loaded) != 16 or any(
+        abs(before - after) > _PLACEMENT_TOLERANCE
+        for before, after in zip(loaded, current)
+    )
+
+
+def participating_parts(collection: bpy.types.Collection) -> tuple[bpy.types.Object, ...]:
+    """Return Load-moved parts plus parts committed by Auto/Lock."""
+    return tuple(sorted(
+        (
+            obj
+            for obj in collection.objects
+            if (
+                obj.type == "MESH"
+                and obj.get("yohsai_role") == "part"
+                and (part_moved_from_load(obj) or bool(obj.get(LOCKED_OBJECT_KEY, False)))
+            )
+        ),
+        key=lambda obj: int(obj.get("yohsai_panel_index", 0)),
+    ))
 
 
 @dataclass(frozen=True)
@@ -898,6 +936,9 @@ def create_clothes_mesh(context, document: dict[str, Any]) -> bpy.types.Collecti
         collection["yohsai_sewing_signature"] = _sewing_signature(document)
         collection["yohsai_sewing_verified"] = False
         context.view_layer.update()
+        for obj in created_objects:
+            obj[LOAD_MATRIX_KEY] = list(_matrix_tuple(obj.matrix_world))
+            obj[LOCKED_OBJECT_KEY] = False
 
         for selected in context.selected_objects:
             selected.select_set(False)
@@ -1394,6 +1435,20 @@ def _multipart_closed_pairs(
     first_obj, second_obj = sorted(open_by_object, key=lambda obj: int(obj.get("yohsai_panel_index", 0)))
     first = open_by_object[first_obj]
     second = open_by_object[second_obj]
+    if count == 1 and first and second:
+        closed_loop = _global_chain(closed[0], offsets[closed[0].obj])
+        partial_assignments: list[tuple[float, list[tuple[int, int]]]] = []
+        for first_chain in first:
+            for second_chain in second:
+                body_loop = _composite_loop(first_chain, second_chain, offsets)
+                alignment_cost, pairs = _circular_alignment(body_loop, closed_loop)
+                join_cost = min(
+                    _closure_cost(first_chain, second_chain, False),
+                    _closure_cost(first_chain, second_chain, True),
+                )
+                partial_assignments.append((alignment_cost + join_cost, pairs))
+        partial_assignments.sort(key=lambda item: item[0])
+        return partial_assignments[0][1]
     if len(first) != count or len(second) != count or count > 8:
         raise SewingError(
             f"Sewing group {label} cannot pair its {count} closed path(s) with the body paths."
@@ -1438,15 +1493,19 @@ def build_sewing_plan(collection: bpy.types.Collection) -> SewingPlan:
     """Validate and return reusable global-index sewing connections for separate parts."""
     if collection is None or collection.get("yohsai_role") != "clothes":
         raise SewingError("No loaded Yohsai clothes collection is selected.")
-    parts = tuple(sorted(
-        (obj for obj in collection.objects if obj.type == "MESH" and obj.get("yohsai_role") == "part"),
-        key=lambda obj: int(obj.get("yohsai_panel_index", 0)),
-    ))
+    parts = participating_parts(collection)
     if len(parts) < 2:
-        raise SewingError("Sewing needs at least two separate cloth parts.")
-    labels = tuple(sorted(set().union(*(_sewing_labels(obj.data) for obj in parts))))
-    if not labels:
-        raise SewingError("The loaded cloth parts contain no sewing groups.")
+        raise SewingError(
+            "Sewing needs at least two parts moved from their Load positions or locked by Auto."
+        )
+    all_parts = tuple(
+        obj
+        for obj in collection.objects
+        if obj.type == "MESH" and obj.get("yohsai_role") == "part"
+    )
+    active = set(parts)
+    labels_by_part = {obj: _sewing_labels(obj.data) for obj in all_parts}
+    active_labels = tuple(sorted(set().union(*(labels_by_part[obj] for obj in parts))))
 
     offsets: dict[bpy.types.Object, int] = {}
     offset = 0
@@ -1455,26 +1514,57 @@ def build_sewing_plan(collection: bpy.types.Collection) -> SewingPlan:
         offset += len(obj.data.vertices)
     connections: list[tuple[str, int, int]] = []
     spring_keys: set[tuple[int, int]] = set()
-    for label in labels:
+    resolved_labels: list[str] = []
+    for label in active_labels:
         by_object = {obj: chains for obj in parts if (chains := _seam_chains(obj, label))}
-        if any(chain.closed for chains in by_object.values() for chain in chains):
-            pairs = _multipart_closed_pairs(by_object, offsets, label)
-        else:
-            if len(by_object) != 2:
-                raise SewingError(f"Sewing group {label} must occur on exactly two different cloth parts.")
-            first_obj, second_obj = sorted(by_object, key=lambda obj: int(obj.get("yohsai_panel_index", 0)))
-            pairs = [
-                (offsets[first_obj] + left_vertex, offsets[second_obj] + right_vertex)
-                for left_chain, right_chain in _pair_chains(by_object[first_obj], by_object[second_obj], label)
-                for left_vertex, right_vertex in _ordered_vertex_pairs(left_chain, right_chain, label)
-            ]
+        inactive = [
+            obj for obj in all_parts
+            if obj not in active and label in labels_by_part[obj]
+        ]
+        active_has_closed = any(chain.closed for chains in by_object.values() for chain in chains)
+        inactive_has_closed = any(
+            chain.closed
+            for obj in inactive
+            for chain in _seam_chains(obj, label)
+        )
+        if inactive_has_closed and not active_has_closed:
+            continue
+        try:
+            if active_has_closed:
+                pairs = _multipart_closed_pairs(by_object, offsets, label)
+            else:
+                if len(by_object) != 2:
+                    raise SewingError(
+                        f"Sewing group {label} must occur on exactly two different cloth parts."
+                    )
+                first_obj, second_obj = sorted(
+                    by_object, key=lambda obj: int(obj.get("yohsai_panel_index", 0))
+                )
+                pairs = [
+                    (offsets[first_obj] + left_vertex, offsets[second_obj] + right_vertex)
+                    for left_chain, right_chain in _pair_chains(
+                        by_object[first_obj], by_object[second_obj], label
+                    )
+                    for left_vertex, right_vertex in _ordered_vertex_pairs(
+                        left_chain, right_chain, label
+                    )
+                ]
+        except SewingError:
+            if inactive:
+                continue
+            raise
+        resolved_labels.append(label)
         for a, b in pairs:
             key = _edge_key(a, b)
             if key in spring_keys:
                 raise SewingError("Two sewing groups produce the same sewing spring.")
             spring_keys.add(key)
             connections.append((label, a, b))
-    return SewingPlan(parts, labels, tuple(connections))
+    if not resolved_labels:
+        raise SewingError(
+            "The moved or Auto-locked parts contain no resolvable sewing group yet."
+        )
+    return SewingPlan(parts, tuple(resolved_labels), tuple(connections))
 
 
 def create_sewn_mesh(
