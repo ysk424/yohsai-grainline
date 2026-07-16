@@ -67,7 +67,6 @@ try:
 
         bpy.ops.mesh.primitive_cube_add(size=1.0, location=(100.0, 100.0, 100.0))
         bpy.context.scene.yohsai.body_object = bpy.context.object
-        bpy.context.scene.yohsai.kitsuke_gravity = 0.0
 
         parts[0].location.y += 0.01
         parts[1].location.y += 0.01
@@ -79,7 +78,7 @@ try:
         preview = next(obj for obj in collection.objects if obj.get("yohsai_role") == "sewn")
         assert list(preview["yohsai_source_parts"]) == [obj.name for obj in parts[:2]]
         assert not parts[2].hide_get() and not parts[3].hide_get()
-        assert bpy.ops.yohsai.kitsuke() == {"FINISHED"}
+        assert bpy.ops.yohsai.kitsuke_zero_gravity() == {"FINISHED"}
         first_session = kitsuke._sessions[collection.as_pointer()]
         assert [part.obj for part in first_session.parts] == parts[:2]
         kitsuke.clear_sessions()
@@ -98,7 +97,7 @@ try:
         assert second_plan.parts == tuple(parts[:3])
         assert second_plan.labels == ("A", "B")
         assert bpy.ops.yohsai.sewing() == {"FINISHED"}
-        assert bpy.ops.yohsai.kitsuke() == {"FINISHED"}
+        assert bpy.ops.yohsai.kitsuke_zero_gravity() == {"FINISHED"}
         second_session = kitsuke._sessions[collection.as_pointer()]
         assert [part.obj for part in second_session.parts] == parts[:3]
         assert [part.locked for part in second_session.parts] == [True, True, False]

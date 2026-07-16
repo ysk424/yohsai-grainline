@@ -232,12 +232,13 @@ The Yohsai N-panel groups all inputs first:
 - `Clothes`: the loaded numbered collection used by later actions;
 - `Body`: select the fixed collision mesh used by Kitsuke.
 
-It then exposes only the four primary actions in workflow order:
+It then exposes the primary actions in workflow order:
 
 - `Load`: parse the pattern and create separate cloth-part objects;
 - `Update`: recut the selected Clothes collection from the same saved file;
 - `Sewing`: build the combined sewn preview after manual part placement;
-- `Kitsuke`: advance a short cloth simulation and restore separate parts;
+- side-by-side `Zero gravity` and `Normal gravity`: advance Kitsuke with 0 or
+  9.81 m/s² and restore separate parts.
 
 A short status message appears below the actions. Solver tuning and silhouette
 export are intentionally absent from this production panel.
@@ -365,8 +366,9 @@ response. Paired seam vertices receive distance-independent attraction until
 they are captured at their fixed zero-length goal. Body contact uses a 0.005 m
 thickness. Self-contact is absent.
 
-One click advances eight fixed 1/240-second steps under a default 1.0 m/s²
-downward acceleration. Seam targets do not change per click.
+One click advances eight fixed 1/240-second steps using 20 material/contact
+iterations. `Zero gravity` applies no downward acceleration and `Normal gravity`
+applies 9.81 m/s². Seam targets do not change per click.
 After the calculation, positions are mapped
 back by source object and vertex index, the combined preview is removed, and
 the separate source objects are shown. The user may translate and rotate any
@@ -386,12 +388,11 @@ reconstructs them from the state restored by Blender. Recovery data is valid onl
 runtime. Continuing an abandoned partially dressed session after reopening
 Blender or reloading the add-on is unsupported.
 
-Gravity and material relaxation values are runtime controls rather than pattern
-data and do not alter the JSON contract. Blender reads the nonnegative gravity
-magnitude on every Kitsuke click and applies it in world -Z; the default is
-1.0 m/s² and zero disables gravity. Material rest data is taken only from the
-pattern mesh; Body data is collision-only. The default backend is the native
-Windows x64 CPU library.
+Gravity choice and fixed material values are runtime behavior rather than
+pattern data and do not alter the JSON contract. The two gravity buttons may be
+alternated during one live session. Material rest data is taken only from the
+pattern mesh; Body data is collision-only. The only product backend is the
+native Windows x64 CPU Square-Lattice library.
 
 ## 13. Update
 

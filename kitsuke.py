@@ -22,18 +22,20 @@ from .mesh_loader import (
     LOCKED_OBJECT_KEY,
     SewingError,
     build_sewing_plan,
+    participating_parts,
 )
 
 
 TIME_STEP = 1.0 / 240.0
 STEPS_PER_CLICK = 8
-SOLVER_ITERATIONS = 16
+SOLVER_ITERATIONS = 20
 MIN_SOLVER_ITERATIONS = 1
 MAX_SOLVER_ITERATIONS = 128
 CONTACT_THICKNESS_M = 0.005
 CONTACT_CORRECTION_MAX_M = 0.0002
 COLLISION_SEARCH_M = 0.04
-DEFAULT_GRAVITY_M_PER_SECOND_SQUARED = 1.0
+ZERO_GRAVITY_M_PER_SECOND_SQUARED = 0.0
+NORMAL_GRAVITY_M_PER_SECOND_SQUARED = 9.81
 SEAM_ATTRACTION_FORCE = 300.0
 SEAM_CAPTURE_DISTANCE_M = 0.002
 STRETCH_RELAXATION = 1.0
@@ -42,7 +44,7 @@ BEND_RELAXATION = 0.0001
 KITSUKE_BACKEND_STABLE_COSSERAT = "STABLE_COSSERAT"
 KITSUKE_BACKEND_TAICHI = "TAICHI"
 DEFAULT_KITSUKE_BACKEND = KITSUKE_BACKEND_STABLE_COSSERAT
-KITSUKE_BACKENDS = frozenset((KITSUKE_BACKEND_STABLE_COSSERAT, KITSUKE_BACKEND_TAICHI))
+KITSUKE_BACKENDS = frozenset((KITSUKE_BACKEND_STABLE_COSSERAT,))
 
 _STATE_EPOCH_KEY = "yohsai_kitsuke_epoch"
 _STATE_REVISION_KEY = "yohsai_kitsuke_revision"
@@ -122,7 +124,7 @@ def _read_persisted_state(
 ) -> tuple[int, np.ndarray, np.ndarray] | None:
     if not _persisted_state_is_current(collection):
         return None
-    stored_backend = str(collection.get(_STATE_BACKEND_KEY, KITSUKE_BACKEND_TAICHI))
+    stored_backend = str(collection.get(_STATE_BACKEND_KEY, KITSUKE_BACKEND_STABLE_COSSERAT))
     if backend is not None and stored_backend != backend:
         raise KitsukeError(
             f"The restored Kitsuke state uses {stored_backend}, not {backend}. "
@@ -864,10 +866,11 @@ def _create_runtime_type(ti):
 
 class _KitsukeSession:
     def __init__(self, context, collection, body, preview, backend: str):
-        try:
-            objects = list(build_sewing_plan(collection).parts)
-        except SewingError as exc:
-            raise KitsukeError(f"Sewing required: {exc}") from exc
+        objects = list(participating_parts(collection))
+        if len(objects) < 2:
+            raise KitsukeError(
+                "Sewing required: at least two parts must be moved from Load or locked by Auto."
+            )
         ranges: list[_PartRange] = []
         position_blocks: list[np.ndarray] = []
         locked_blocks: list[np.ndarray] = []

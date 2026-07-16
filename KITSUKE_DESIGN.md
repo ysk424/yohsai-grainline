@@ -48,8 +48,8 @@ Self-contact is absent.
 
 - time step: 1/240 s;
 - substeps per click: 8;
-- gravity input: nonnegative acceleration in world -Z, default 1.0 m/s²;
-- default material/contact iterations: 16;
+- gravity per click: either 0 or 9.81 m/s² in world -Z;
+- material/contact iterations: fixed at 20;
 - seam attraction: 300 force units (300 m/s² at unit inverse mass);
 - seam capture distance: 2 mm;
 - edge stretch relaxation per sweep: 1.0, with four alternating sweeps;
@@ -58,10 +58,10 @@ Self-contact is absent.
 - Body candidate radius: 40 mm;
 - Body contact thickness: 5 mm.
 
-Kitsuke reads the gravity field at every click. Changing it during a live
-session leaves the current positions and velocities intact; the new value is
-used by the next click. A value of 10 therefore applies `(0, 0, -10)` m/s²,
-and zero disables gravity.
+`Zero gravity` advances with no gravitational acceleration. `Normal gravity`
+applies `(0, 0, -9.81)` m/s². Either button can follow the other within the same
+live session without resetting positions, velocities, or seam state. The solver
+is always the native CPU Square-Lattice Cloth backend.
 
 After the coupled material iterations, additional alternating edge/seam sweeps
 converge the strong sewing load into the lattice so a stitch vertex cannot run

@@ -14,16 +14,15 @@ The N-panel contains these inputs:
 
 - `Pattern Path`: the Illustrator PDF;
 - `Clothes`: the loaded Yohsai collection;
-- `Body`: the fixed collision mesh used by Kitsuke;
-- `Gravity (-Z m/s²)`: downward acceleration for the next Kitsuke click.
+- `Body`: the fixed collision mesh used by Kitsuke.
 
 The normal operation order is:
 
 1. `Load` creates one Mesh object per pattern panel instance.
 2. Translate and rotate the separate parts in Object Mode.
 3. `Sewing` validates sewing paths and creates a connectivity preview.
-4. Select the Body and press `Kitsuke` to advance a short simulation.
-5. Continue alternating Object Mode placement and Kitsuke clicks.
+4. Select the Body, then press `Zero gravity` or `Normal gravity`.
+5. Continue placement and use either gravity button in any order.
 6. Use `Update` after editing the same Illustrator PDF.
 
 `Lock` excludes selected part objects from Kitsuke deformation while retaining
@@ -63,8 +62,9 @@ initial cloth shape. Body geometry is not used by Sewing.
 
 ## Kitsuke
 
-Kitsuke starts from the positioned source-panel vertices. The default backend is
-the native CPU square-lattice cloth solver.
+Kitsuke starts from the positioned source-panel vertices. The solver is always
+the native CPU Square-Lattice Cloth solver; no solver or iteration setup is
+required.
 
 Each click applies:
 
@@ -77,11 +77,11 @@ Pattern attributes define every material rest value. The render-triangulation
 diagonal carries no spring, and no material term reads Body shape, normals, or
 bones. The Body may influence particles only through collision contact.
 
-The default values are an eight-substep click, a 1/240-second substep,
-16 material/contact iterations, 1.0 m/s² gravity, constant-magnitude seam
-attraction with 2 mm capture, and 5 mm contact thickness. Gravity is read from
-the N-panel on every click: a positive value acts in world -Z, and zero disables
-gravity. It may be changed without resetting the live simulation.
+Every click uses eight 1/240-second substeps, 20 material/contact iterations,
+constant-magnitude seam attraction with 2 mm capture, and 5 mm contact
+thickness. `Zero gravity` applies 0 m/s² and `Normal gravity` applies 9.81 m/s²
+in world -Z. The two buttons may be alternated without resetting the live
+simulation.
 
 After a click, positions are scattered back to the separate part objects. Object
 translation and rotation are supported between clicks; scaling and vertex-count

@@ -15,7 +15,8 @@ Status: current development state
   by bending out of plane, not by letting a span collapse.
 - Body participates only through contact correction, which dissipates only.
 - Self-contact and Body-relative rest-shape forces are absent.
-- Gravity is read from the N-panel on each click and applied in world -Z.
+- Zero gravity and Normal gravity select 0 or 9.81 m/s² per click in world -Z.
+- The product path always uses the native Square-Lattice solver at 20 iterations.
 - Only a non-finite returned state causes click rollback; finite displacement is
   unrestricted.
 - Update recuts meshes from stable panel labels.
@@ -34,6 +35,6 @@ python -m unittest discover -s tests -p "test_*.py"
 ctest --test-dir build -C Release --output-on-failure
 ```
 
-The release archive contains current source, documentation, bundled wheels,
+The release archive contains current source, documentation, the bundled PDF wheel,
 `bin/yohsai_cosserat.dll`, and `bin/vcomp140.dll`. Build directories, caches,
 temporary files, local PDFs, and earlier ZIPs are excluded.

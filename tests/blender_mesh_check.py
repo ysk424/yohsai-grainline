@@ -158,7 +158,12 @@ try:
     ]
     kitsuke_result = bpy.ops.yohsai.kitsuke()
     assert kitsuke_result == {"FINISHED"}, bpy.context.scene.yohsai.parse_status
+    assert "gravity -Z 9.81" in bpy.context.scene.yohsai.parse_status
+    assert "material/contact 20 iterations" in bpy.context.scene.yohsai.parse_status
+    assert not hasattr(bpy.context.scene.yohsai, "kitsuke_backend")
+    assert not hasattr(bpy.context.scene.yohsai, "kitsuke_iterations")
     session = kitsuke_module._sessions[collection.as_pointer()]
+    assert session.backend == kitsuke_module.KITSUKE_BACKEND_STABLE_COSSERAT
     assert session.runtime.seam_count == len(spring_pairs) > 0
     assert not hasattr(session, "edge_rest")
     assert len(session.topology.edges) > 0
@@ -220,18 +225,17 @@ try:
 
 # Object-mode placement between clicks is accepted while the live simulation
 # retains exact sewing pairs without a persistent combined preview mesh.
-    assert abs(bpy.context.scene.yohsai.kitsuke_gravity - 1.0) < 1.0e-7
+    assert not hasattr(bpy.context.scene.yohsai, "kitsuke_gravity")
     parts[0].location.x += 0.01
     parts[0].rotation_euler.z += 0.02
-    bpy.context.scene.yohsai.kitsuke_gravity = 10.0
-    second_kitsuke = bpy.ops.yohsai.kitsuke()
+    second_kitsuke = bpy.ops.yohsai.kitsuke_zero_gravity()
     assert second_kitsuke == {"FINISHED"}, bpy.context.scene.yohsai.parse_status
-    assert "gravity -Z 10" in bpy.context.scene.yohsai.parse_status
-    assert not hasattr(bpy.context.scene.yohsai, "kitsuke_seam_pull_mm")
-    bpy.context.scene.yohsai.kitsuke_gravity = 0.0
-    assert bpy.ops.yohsai.kitsuke() == {"FINISHED"}
     assert "gravity -Z 0" in bpy.context.scene.yohsai.parse_status
-    bpy.context.scene.yohsai.kitsuke_gravity = 10.0
+    assert not hasattr(bpy.context.scene.yohsai, "kitsuke_seam_pull_mm")
+    assert bpy.ops.yohsai.kitsuke() == {"FINISHED"}
+    assert "gravity -Z 9.81" in bpy.context.scene.yohsai.parse_status
+    assert bpy.ops.yohsai.kitsuke_zero_gravity() == {"FINISHED"}
+    assert "gravity -Z 0" in bpy.context.scene.yohsai.parse_status
     for _step in range(7):
         repeated_kitsuke = bpy.ops.yohsai.kitsuke()
         assert repeated_kitsuke == {"FINISHED"}, bpy.context.scene.yohsai.parse_status
@@ -298,8 +302,7 @@ try:
             obj.location.x += 0.001
         assert bpy.ops.yohsai.sewing() == {"FINISHED"}
         assert bool(update_collection["yohsai_sewing_verified"])
-        bpy.context.scene.yohsai.kitsuke_gravity = 0.0
-        assert bpy.ops.yohsai.kitsuke() == {"FINISHED"}
+        assert bpy.ops.yohsai.kitsuke_zero_gravity() == {"FINISHED"}
         assert "gravity -Z 0" in bpy.context.scene.yohsai.parse_status
         object_pointers = [obj.as_pointer() for obj in update_parts]
         old_vertex_counts = [len(obj.data.vertices) for obj in update_parts]
@@ -320,9 +323,8 @@ try:
         assert [len(obj.data.vertices) for obj in update_parts] != old_vertex_counts
         assert bool(update_collection["yohsai_sewing_verified"])
         assert not any(obj.get("yohsai_role") == "sewn" for obj in update_collection.objects)
-        bpy.context.scene.yohsai.kitsuke_gravity = 10.0
         assert bpy.ops.yohsai.kitsuke() == {"FINISHED"}
-        assert "gravity -Z 10" in bpy.context.scene.yohsai.parse_status
+        assert "gravity -Z 9.81" in bpy.context.scene.yohsai.parse_status
 
         changed_sewing_svg = larger_svg.replace(">A</text>", ">B</text>")
         update_path.write_text(changed_sewing_svg, encoding="utf-8")

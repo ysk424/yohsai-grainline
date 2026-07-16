@@ -12,19 +12,16 @@ from pathlib import Path
 
 import bpy
 from bpy.app.handlers import persistent
-from bpy.props import BoolProperty, EnumProperty, FloatProperty, IntProperty, PointerProperty, StringProperty
+from bpy.props import BoolProperty, PointerProperty, StringProperty
 from bpy.types import Collection, Object, Operator, Panel, PropertyGroup
 
 from .kitsuke import (
-    DEFAULT_GRAVITY_M_PER_SECOND_SQUARED,
-    DEFAULT_KITSUKE_BACKEND,
     KitsukeError,
     LOCKED_OBJECT_KEY,
     KITSUKE_BACKEND_STABLE_COSSERAT,
-    KITSUKE_BACKEND_TAICHI,
-    MAX_SOLVER_ITERATIONS,
-    MIN_SOLVER_ITERATIONS,
+    NORMAL_GRAVITY_M_PER_SECOND_SQUARED,
     SOLVER_ITERATIONS,
+    ZERO_GRAVITY_M_PER_SECOND_SQUARED,
     advance_kitsuke,
     clear_kitsuke_session,
     clear_sessions,
@@ -47,13 +44,13 @@ _JSON_FILENAME = "yohsai_pattern.json"
 
 @persistent
 def _history_change_post(_unused) -> None:
-    """Discard non-undoable Taichi objects after Blender restores its data."""
+    """Discard non-undoable solver objects after Blender restores its data."""
     clear_sessions()
 
 
 @persistent
 def _file_load_pre(_unused) -> None:
-    """Give every loaded file a new recovery epoch and no stale Taichi objects."""
+    """Give every loaded file a new recovery epoch and no stale solver objects."""
     reset_runtime_epoch()
 
 
@@ -278,40 +275,6 @@ class YohsaiProperties(PropertyGroup):
         get=_get_lock_selection,
         set=_set_lock_selection,
     )
-    kitsuke_backend: EnumProperty(
-        name="Solver",
-        description="Physics backend used for a new Kitsuke session",
-        items=(
-            (
-                KITSUKE_BACKEND_STABLE_COSSERAT,
-                "Square-Lattice Cloth",
-                "Native CPU cloth with warp/weft stretch, quad shear, light bending, constant-force seams, and Body contact",
-            ),
-            (
-                KITSUKE_BACKEND_TAICHI,
-                "Taichi Cloth",
-                "Taichi implementation of the same constant-force square-lattice material model",
-            ),
-        ),
-        default=DEFAULT_KITSUKE_BACKEND,
-    )
-    kitsuke_iterations: IntProperty(
-        name="Solver Iterations",
-        description="Material and Body-contact iterations per substep",
-        default=SOLVER_ITERATIONS,
-        min=MIN_SOLVER_ITERATIONS,
-        max=MAX_SOLVER_ITERATIONS,
-        soft_min=4,
-        soft_max=64,
-    )
-    kitsuke_gravity: FloatProperty(
-        name="Gravity (-Z m/s²)",
-        description="Downward acceleration used by the next Kitsuke click; zero disables gravity",
-        default=DEFAULT_GRAVITY_M_PER_SECOND_SQUARED,
-        min=0.0,
-        soft_max=10.0,
-        precision=2,
-    )
 
 
 class YOHSAI_OT_lock_auto(Operator):
@@ -494,10 +457,36 @@ class YOHSAI_OT_sewing(Operator):
         return {"FINISHED"}
 
 
-class YOHSAI_OT_kitsuke(Operator):
-    bl_idname = "yohsai.kitsuke"
-    bl_label = "Kitsuke"
-    bl_description = "Advance a short cloth simulation, then restore the separate parts for manual placement"
+def _run_kitsuke(operator: Operator, context, gravity_magnitude: float):
+    props = context.scene.yohsai
+    try:
+        message = advance_kitsuke(
+            context,
+            props.clothes_collection,
+            props.body_object,
+            gravity_magnitude,
+            SOLVER_ITERATIONS,
+            KITSUKE_BACKEND_STABLE_COSSERAT,
+        )
+    except KitsukeError as exc:
+        message = str(exc).strip() or type(exc).__name__
+        props.parse_status = f"Kitsuke failed: {message[:240]}"
+        operator.report({"ERROR"}, message)
+        return {"CANCELLED"}
+    except Exception as exc:
+        message = str(exc).strip() or type(exc).__name__
+        props.parse_status = f"Kitsuke failed: {message[:240]}"
+        operator.report({"ERROR"}, message)
+        return {"CANCELLED"}
+    props.parse_status = message
+    operator.report({"INFO"}, message)
+    return {"FINISHED"}
+
+
+class YOHSAI_OT_kitsuke_zero_gravity(Operator):
+    bl_idname = "yohsai.kitsuke_zero_gravity"
+    bl_label = "Zero gravity"
+    bl_description = "Advance Kitsuke without gravity while retaining the live session"
     bl_options = {"REGISTER", "UNDO"}
 
     @classmethod
@@ -505,29 +494,21 @@ class YOHSAI_OT_kitsuke(Operator):
         return context.mode == "OBJECT"
 
     def execute(self, context):
-        props = context.scene.yohsai
-        try:
-            message = advance_kitsuke(
-                context,
-                props.clothes_collection,
-                props.body_object,
-                props.kitsuke_gravity,
-                props.kitsuke_iterations,
-                props.kitsuke_backend,
-            )
-        except KitsukeError as exc:
-            message = str(exc).strip() or type(exc).__name__
-            props.parse_status = f"Kitsuke failed: {message[:240]}"
-            self.report({"ERROR"}, message)
-            return {"CANCELLED"}
-        except Exception as exc:
-            message = str(exc).strip() or type(exc).__name__
-            props.parse_status = f"Kitsuke failed: {message[:240]}"
-            self.report({"ERROR"}, message)
-            return {"CANCELLED"}
-        props.parse_status = message
-        self.report({"INFO"}, message)
-        return {"FINISHED"}
+        return _run_kitsuke(self, context, ZERO_GRAVITY_M_PER_SECOND_SQUARED)
+
+
+class YOHSAI_OT_kitsuke(Operator):
+    bl_idname = "yohsai.kitsuke"
+    bl_label = "Normal gravity"
+    bl_description = "Advance Kitsuke with normal gravity (9.81 m/s²) while retaining the live session"
+    bl_options = {"REGISTER", "UNDO"}
+
+    @classmethod
+    def poll(cls, context):
+        return context.mode == "OBJECT"
+
+    def execute(self, context):
+        return _run_kitsuke(self, context, NORMAL_GRAVITY_M_PER_SECOND_SQUARED)
 
 
 class YOHSAI_PT_main(Panel):
@@ -550,15 +531,14 @@ class YOHSAI_PT_main(Panel):
         lock_row = inputs.row(align=True)
         lock_row.prop(props, "lock_selection")
         lock_row.operator(YOHSAI_OT_lock_auto.bl_idname, text="Auto")
-        inputs.prop(props, "kitsuke_backend")
-        inputs.prop(props, "kitsuke_iterations")
-        inputs.prop(props, "kitsuke_gravity")
         layout.separator(factor=0.4)
         actions = layout.column(align=True)
         actions.operator(YOHSAI_OT_load_svg.bl_idname, text="Load")
         actions.operator(YOHSAI_OT_update_svg.bl_idname, text="Update")
         actions.operator(YOHSAI_OT_sewing.bl_idname, text="Sewing")
-        actions.operator(YOHSAI_OT_kitsuke.bl_idname, text="Kitsuke")
+        gravity_actions = actions.row(align=True)
+        gravity_actions.operator(YOHSAI_OT_kitsuke_zero_gravity.bl_idname, text="Zero gravity")
+        gravity_actions.operator(YOHSAI_OT_kitsuke.bl_idname, text="Normal gravity")
         layout.label(text=props.parse_status)
 
 
@@ -568,6 +548,7 @@ _classes = (
     YOHSAI_OT_load_svg,
     YOHSAI_OT_update_svg,
     YOHSAI_OT_sewing,
+    YOHSAI_OT_kitsuke_zero_gravity,
     YOHSAI_OT_kitsuke,
     YOHSAI_PT_main,
 )

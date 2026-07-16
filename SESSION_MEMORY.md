@@ -5,6 +5,12 @@ Recorded: 2026-07-16 (Asia/Tokyo)
 ## Current contract
 
 - Sewing supplies exact seam connectivity only.
+- Load records every part's initial Object Mode matrix. Parts that remain there
+  are excluded from Sewing and Kitsuke; moved or Auto-locked parts participate.
+- Unresolvable sewing paths remain pending. Adding one sleeve resolves that
+  side of a multipart `C` group without waiting for the other sleeve.
+- Auto locks exactly the parts completed by the latest Kitsuke step, clears the
+  transient session, and starts the next incremental Sewing stage.
 - Kitsuke starts from positioned source-panel vertices.
 - Seam targets are fixed at zero and never shorten per click.
 - Before 2 mm capture, seam closure is a fixed distance per substep, independent
@@ -27,8 +33,11 @@ Recorded: 2026-07-16 (Asia/Tokyo)
 - No material term reads Body geometry, Body normals, or bones.
 - Body geometry enters only through collision candidate lookup and contact.
 - Self-contact and Body-relative shape matching are absent.
-- Gravity is a per-click N-panel input: positive values act in world -Z, default
-  1.0 m/s², and zero disables gravity without resetting live state.
+- Gravity is chosen per click with adjacent buttons: Zero gravity applies 0 and
+  Normal gravity applies 9.81 m/s² in world -Z. They can be alternated without
+  resetting live state.
+- The product always uses native Square-Lattice Cloth with 20 iterations. Solver
+  and iteration controls are intentionally absent from the beginner-facing UI.
 - Finite per-click movement has no rollback threshold; only non-finite state is
   rolled back.
 
@@ -73,28 +82,30 @@ lands in the same range as a warp span.
 Native and Blender tests cover fixed seam targets, distance-independent seam
 closure at 50 cm and 5 cm, 2 mm capture, rigid-transform/rest invariance, edge
 load transmission, quad shear reduction, axial bend reduction,
-Body-candidate-only contact, per-click gravity changes including 1→10 and 0→10,
-Undo/Redo reconstruction, and full pattern data.
+Body-candidate-only contact, alternating 0↔9.81 gravity buttons,
+Undo/Redo reconstruction, two→three→four-part Auto staging, partial multipart
+`C` resolution (83 connections for one sleeve, 166 for both), and full pattern
+data. The user also confirmed the final simplified interface can produce the
+intended dressed result in the live character scene.
 
 Convergence is covered by none of them and must be measured. A 24x24 lattice of
-1 cm cells hung from its top row, at the shipped 16 iterations, holds every span
-inside the crimp reserve, peaks at +0.47%, and is flat from the third click
-onward. That lattice has no seams and no Body contact, so it bounds the material
-terms only; the garment scene remains the real check.
+1 cm cells hung from its top row, at the previously shipped 16 iterations, holds
+every span inside the crimp reserve, peaks at +0.47%, and is flat from the third
+click onward. That lattice has no seams and no Body contact, so it bounds the
+material terms only; the garment scene remains the real check.
 
 ## Release
 
-Current release: `yohsai-0.5.12.zip` (85,724,666 bytes).
+Current release: `yohsai-0.6.0.zip`, the beginner-facing incremental dressing
+release. Its exact size and SHA-256 are reported alongside the built artifact so
+this packaged document does not contain a self-invalidating archive hash.
 
-SHA-256: `6F298B843524B1819A1BC5D00B8E706383C7358FEE8F33CE54430F28AE5C6AF8`.
+The archive contains 32 entries and its bundled native DLL matches
+`bin/yohsai_cosserat.dll`. Keep current source, manifest, the PDF parsing wheel,
+native binaries, licenses, and current documentation. Exclude build output,
+caches, temporary parser output, local PDFs, and older archives from future
+ZIPs.
 
-The archive contains 40 entries and its bundled native DLL matches
-`bin/yohsai_cosserat.dll`. Keep current source, manifest, dependencies, native
-binaries, licenses, and current documentation. Exclude build output, caches,
-temporary parser output, local PDFs, and older archives from future ZIPs.
-
-Roughly 83 of the 86 MB is the bundled Taichi wheel, which exists only for the
-`TAICHI` Kitsuke backend. That backend still carries the pre-0.5.11 seam impulse
-and the old `BEND_RELAXATION = 0.0001`, so selecting it restores the behaviour
-0.5.11 and 0.5.12 removed. It is a second solver to keep in step, and 97% of the
-download.
+The Taichi backend is no longer product-selectable or bundled. The release uses
+only the native Square-Lattice solver, avoiding an unused roughly 83 MB wheel
+and a second solver that would need to be kept behaviorally synchronized.
