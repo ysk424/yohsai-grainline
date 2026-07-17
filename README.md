@@ -167,17 +167,36 @@ Character silhouettes are exported separately with
 - `XPBD_HANDOFF_DESIGN.md`: Blender 5.2 experimental cloth compatibility plan;
 - `SESSION_MEMORY.md`: concise current handoff.
 
+## Platforms
+
+Yohsai ships as native per-platform packages and installs on:
+
+- **Windows x64** (`yohsai-<version>-windows_x64.zip`) — bundles
+  `yohsai_cosserat.dll` and the licensed `vcomp140.dll` OpenMP runtime;
+- **macOS Apple Silicon (arm64)** (`yohsai-<version>-macos_arm64.zip`) — bundles
+  `libyohsai_cosserat.dylib`.
+
+The Python solver bridge loads whichever native library matches the host, so a
+single build works on either platform once the matching package is installed.
+Intel macOS (x86_64) is not yet packaged.
+
 ## Native development
 
-Visual Studio 2022 Build Tools, CMake, and the standard OpenMP runtime are
-sufficient for the Windows CPU backend:
+On Windows, Visual Studio 2022 Build Tools, CMake, and the standard OpenMP
+runtime are sufficient for the CPU backend:
 
 ```powershell
 .\build_native.ps1 -Configuration Release
 ```
 
-The script builds the DLL and native tests, runs CTest, and installs the runtime
-files into `bin/`.
+On macOS (or Linux), use the shell script with CMake and a C++20 compiler:
+
+```bash
+./build_native.sh
+```
+
+Each script builds the native library and tests, runs CTest, and installs the
+runtime files (`.dll`/`.dylib`) into `bin/`.
 
 ## License
 
