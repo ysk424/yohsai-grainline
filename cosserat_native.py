@@ -122,8 +122,12 @@ def _library_candidates() -> tuple[Path, ...]:
     candidates.extend(
         (
             root / "bin" / "yohsai_cosserat.dll",
+            root / "bin" / "libyohsai_cosserat.dylib",
+            root / "bin" / "libyohsai_cosserat.so",
             root / "build" / "bin" / "Release" / "yohsai_cosserat.dll",
             root / "build" / "bin" / "Debug" / "yohsai_cosserat.dll",
+            root / "build" / "bin" / "libyohsai_cosserat.dylib",
+            root / "build" / "bin" / "libyohsai_cosserat.so",
         )
     )
     return tuple(candidates)
@@ -204,7 +208,8 @@ def _load_library() -> ctypes.CDLL:
             )
         return library
     raise NativeCosseratError(
-        "Native Kitsuke library was not found. Build it with build_native.ps1. "
+        "Native Kitsuke library was not found. "
+        "Build it with build_native.ps1 (Windows) or build_native.sh (macOS/Linux). "
         f"Searched: {', '.join(attempted)}"
     )
 

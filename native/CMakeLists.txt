@@ -5,9 +5,8 @@ add_library(yohsai_cosserat SHARED
     src/solver.cpp
 )
 
-find_package(OpenMP REQUIRED COMPONENTS CXX)
-
 if(MSVC)
+    find_package(OpenMP REQUIRED COMPONENTS CXX)
     # MSVC OpenMP links VCOMP140.DLL dynamically. Install the licensed x64
     # redistributable beside the solver so a portable Blender installation
     # does not depend on an unrelated system-wide VC runtime installation.
@@ -35,7 +34,9 @@ target_include_directories(yohsai_cosserat
 
 target_compile_features(yohsai_cosserat PUBLIC cxx_std_20)
 target_compile_definitions(yohsai_cosserat PRIVATE YSC_BUILD_DLL)
-target_link_libraries(yohsai_cosserat PRIVATE OpenMP::OpenMP_CXX)
+if(MSVC)
+    target_link_libraries(yohsai_cosserat PRIVATE OpenMP::OpenMP_CXX)
+endif()
 
 if(MSVC)
     target_compile_options(yohsai_cosserat PRIVATE /W4 /permissive- /EHsc)
