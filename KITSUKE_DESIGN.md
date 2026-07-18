@@ -93,13 +93,18 @@ Pushing intersecting triangles apart does not work: separating one fold cascades
 into new intersections and never converges.  Instead each fold is unfolded by
 smoothing its neighbourhood:
 
-1. Detect the hits two ways and take the union of their vertices: a BVH
-   face-vs-face self-overlap (cheap, catches the deep gather folds), and an
-   **edge-vs-triangle** ray test over every mesh edge -- the latter is ppf's
-   actual self-intersection check and is the one that catches seam and
+1. Detect the hits and take the union of their vertices.  ppf uses exact
+   predicates (edge-vs-triangle plus a coplanar fallback), which a float ray
+   test cannot mirror exactly -- a strict BVH and a 1 mm-inflated BVH do not
+   even nest.  So run three tests and union them: a face-vs-face overlap on the
+   inflated tree (cheap, catches the deep gather folds), and an
+   **edge-vs-triangle** ray test over every mesh edge on **both** the strict and
+   the inflated tree.  The edge test is the one that catches seam and
    panel-boundary edges (including the loose stitch edges) piercing a triangle
-   with no face overlapping, which a face-only test misses.  Pairs/edges that
-   share a vertex with the triangle are excluded.
+   with no face overlapping.  The 1 mm clearance stays below the >=2.2 mm ZOZO
+   stitch openings, so the intentional loose stitches are never flagged, and it
+   gives ppf's exact test headroom.  Edges that share a vertex with the
+   triangle are excluded.
 2. Expand the hit vertices by **two rings** along the mesh -- solve the region
    around each hit, not just the hit.
 3. Strongly Laplacian-smooth that region (0.6 toward the neighbour average, four

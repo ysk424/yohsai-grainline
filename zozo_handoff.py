@@ -20,6 +20,9 @@ ZOZO_CONTACT_GAP_M = 0.001
 # ZOZO keeps a loose stitch edge open by 1.1 * (gap_a + gap_b) + 1e-5.
 ZOZO_STITCH_OPENING_M = 1.1 * (2.0 * ZOZO_CONTACT_GAP_M) + 1.0e-5
 MAX_HANDOFF_SEAM_DISTANCE_M = 0.01
+# Clearance the self-intersection resolver leaves between cloth layers so ppf's
+# exact edge/coplanar test passes; kept below the ZOZO stitch opening.
+_SELF_INTERSECTION_CLEARANCE_M = 0.001
 _BODY_CLEARANCE_M = 1.1 * ZOZO_CONTACT_GAP_M
 _HANDOFF_COLLECTION_ROLE = "zozo_handoff"
 _HANDOFF_CLOTH_ROLE = "zozo_cloth"
@@ -274,29 +277,36 @@ def _resolve_self_intersections(
     bm.free()
 
     def involved_vertices(current: np.ndarray) -> set[int]:
-        tree = BVHTree.FromPolygons(
-            [Vector(p) for p in current], tris, all_triangles=True, epsilon=1.0e-7
+        # ppf detects real intersections (edge-vs-triangle plus a coplanar
+        # fallback) with exact predicates, which a float ray test cannot mirror
+        # exactly.  A strict tree and a 1 mm-inflated tree do not even nest, so
+        # take the union of both: the strict tree catches real piercings, the
+        # inflated tree catches near-touches and coplanar overlaps, and the
+        # resolver smooths until neither reports a hit -- leaving ppf's exact
+        # test a clearance below the >=2.2 mm ZOZO stitch openings, so the
+        # intentional loose stitches are never flagged.
+        points = [Vector(p) for p in current]
+        strict = BVHTree.FromPolygons(points, tris, all_triangles=True, epsilon=0.0)
+        inflated = BVHTree.FromPolygons(
+            points, tris, all_triangles=True, epsilon=_SELF_INTERSECTION_CLEARANCE_M
         )
         hits: set[int] = set()
-        # Face-vs-face overlaps catch the deep gather folds cheaply.
-        for a, b in tree.overlap(tree):
+        for a, b in inflated.overlap(inflated):
             if a < b and not (face_verts[a] & face_verts[b]):
                 hits.update(tris[a]); hits.update(tris[b])
-        # Edge-vs-triangle piercing is ppf's actual self-intersection test; it
-        # also catches seam and panel-boundary edges (including the loose stitch
-        # edges) that pierce a triangle without any face overlapping.
-        for a, b in edges:
-            start = Vector(current[a])
-            direction = Vector(current[b]) - start
-            length = direction.length
-            if length < 1.0e-9:
-                continue
-            direction = direction / length
-            hit = tree.ray_cast(start + direction * 1.0e-6, direction, length - 2.0e-6)
-            if hit and hit[0] is not None:
-                face = hit[2]
-                if face is not None and a not in tris[face] and b not in tris[face]:
-                    hits.add(a); hits.add(b); hits.update(tris[face])
+        for tree in (strict, inflated):
+            for a, b in edges:
+                start = Vector(current[a])
+                direction = Vector(current[b]) - start
+                length = direction.length
+                if length < 1.0e-9:
+                    continue
+                direction = direction / length
+                hit = tree.ray_cast(start + direction * 1.0e-8, direction, length - 2.0e-8)
+                if hit and hit[0] is not None:
+                    face = hit[2]
+                    if face is not None and a not in tris[face] and b not in tris[face]:
+                        hits.add(a); hits.add(b); hits.update(tris[face])
         return hits
 
     for _pass in range(max_passes):
