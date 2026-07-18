@@ -79,6 +79,41 @@ farther outside the body, so the adjacent panel triangles stretch across the
 hole without bending the panels or entering the body. Like a real 2 mm stitch
 line this is a small, deliberate imperfection, accepted as part of the garment.
 
+## ZOZO hand-off self-intersection resolution
+
+ppf/ZOZO rejects any shell whose edge pierces another triangle of the same mesh
+at rest ("Cannot create session: ... self-intersections"); it only detects, it
+ships no resolver.  Gather sewing leaves the excess fabric folded onto itself in
+the completed drape -- at the shoulders (the eased sleeve cap), the bust, and the
+sides -- so the hand-off shell carries hundreds of self-intersections that are
+inherent to the drape, not to the seam matching.  `prepare_for_zozo` resolves
+them on the cloth object, right after it is built, before handing off.
+
+Pushing intersecting triangles apart does not work: separating one fold cascades
+into new intersections and never converges.  Instead each fold is unfolded by
+smoothing its neighbourhood:
+
+1. Detect the self-intersecting triangle pairs (a BVH self-overlap, excluding
+   pairs that share a vertex) -- the same edge-vs-triangle test ppf uses, so the
+   hits match ppf's own `self_intersection` violations.
+2. Collect the vertices of every intersecting triangle and **expand the set by
+   two rings** along the mesh -- solve the region around each hit, not just the
+   hit.
+3. Strongly Laplacian-smooth that region (0.6 toward the neighbour average, four
+   sub-iterations) to flatten the crumple.
+4. Repeat until no intersection remains (capped at 40 passes).
+
+The folds sit outside the body, so flattening them does not drive cloth inward;
+as a fallback any vertex still inside the body afterwards is clamped back onto
+its surface plus the body clearance.  ppf then re-sews the loose stitches and
+re-drapes the smoothed region with contact, which re-forms the gathers without
+re-creating the self-intersection.
+
+On the reference garment this took the hand-off shell from 526 self-intersections
+to 0 in under a second, with no body penetration and the 1:1 seams intact.  The
+smoothing is method one; the body clamp is the fallback method two for any fold
+that a purely tangential smoothing could not lift clear.
+
 ## Body contact
 
 Body is a fixed collider. Candidate lookup uses the evaluated world-space Body

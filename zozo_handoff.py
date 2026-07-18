@@ -6,6 +6,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import re
 
+import bmesh
 import bpy
 import numpy as np
 from mathutils import Vector
@@ -235,6 +236,82 @@ def _open_stitches(
     return result, maximum_before, minimum_after
 
 
+def _resolve_self_intersections(
+    obj: bpy.types.Object, body_bvh: BVHTree, max_passes: int = 40
+) -> int:
+    """Unfold the drape's self-intersecting regions so ppf/ZOZO accepts the mesh.
+
+    ppf rejects any shell whose edge pierces another triangle at rest, and gather
+    sewing leaves the excess fabric folded onto itself at the shoulders, bust and
+    sides.  Pushing folds apart cascades and never converges, so instead each
+    intersecting cluster and its two-ring neighbourhood is strongly smoothed,
+    which unfolds the crumple.  The folds sit outside the body, so flattening
+    them does not drive cloth inward; any vertex still left inside is clamped
+    back out as a fallback.  ppf then re-sews and re-drapes the smoothed region
+    with contact.  Returns the number of intersections still present.
+    """
+    mesh = obj.data
+    world = obj.matrix_world
+    inverse = world.inverted_safe()
+    bm = bmesh.new()
+    bm.from_mesh(mesh)
+    bmesh.ops.triangulate(bm, faces=bm.faces)  # keeps vertex indexing
+    bm.verts.ensure_lookup_table()
+    bm.faces.ensure_lookup_table()
+    tris = [[v.index for v in f.verts] for f in bm.faces]
+    face_verts = [set(t) for t in tris]
+    coords = np.array([list(world @ v.co) for v in bm.verts], dtype=np.float64)
+    adjacency: list[list[int]] = [[] for _ in range(len(bm.verts))]
+    seen = [set() for _ in range(len(bm.verts))]
+    for edge in bm.edges:
+        a, b = edge.verts[0].index, edge.verts[1].index
+        if b not in seen[a]:
+            adjacency[a].append(b); seen[a].add(b)
+        if a not in seen[b]:
+            adjacency[b].append(a); seen[b].add(a)
+    bm.free()
+
+    def detect(current: np.ndarray) -> list[tuple[int, int]]:
+        tree = BVHTree.FromPolygons(
+            [Vector(p) for p in current], tris, all_triangles=True, epsilon=0.0
+        )
+        return [
+            (a, b) for a, b in tree.overlap(tree)
+            if a < b and not (face_verts[a] & face_verts[b])
+        ]
+
+    for _pass in range(max_passes):
+        pairs = detect(coords)
+        if not pairs:
+            break
+        involved: set[int] = set()
+        for a, b in pairs:
+            involved.update(tris[a]); involved.update(tris[b])
+        for _ring in range(2):  # solve the neighbourhood around each hit, not just the hit
+            grown = set(involved)
+            for vertex in involved:
+                grown.update(adjacency[vertex])
+            involved = grown
+        for _sub in range(4):
+            updates = {
+                vertex: coords[adjacency[vertex]].mean(axis=0)
+                for vertex in involved if adjacency[vertex]
+            }
+            for vertex, target in updates.items():
+                coords[vertex] = 0.6 * target + 0.4 * coords[vertex]
+
+    # Fallback: clamp any vertex left inside the body back onto its surface.
+    for index in range(len(coords)):
+        location, normal, _face, _distance = body_bvh.find_nearest(Vector(coords[index]))
+        if location is not None and (Vector(coords[index]) - location).dot(normal) < 0.0:
+            coords[index] = np.array(location + normal * _BODY_CLEARANCE_M)
+
+    for index, vertex in enumerate(mesh.vertices):
+        vertex.co = inverse @ Vector(coords[index])
+    mesh.update()
+    return len(detect(coords))
+
+
 def _pattern_positions(obj: bpy.types.Object) -> list[tuple[float, float]]:
     attribute = obj.data.attributes.get("yohsai_pattern_position")
     if (
@@ -437,6 +514,8 @@ def prepare_for_zozo(
 
     handoff = _handoff_collection(context, collection)
     cloth = _create_cloth_object(handoff, collection, parts, positions, seams)
+    # Unfold the gather-drape's self-intersections so ppf/ZOZO accepts the shell.
+    _resolve_self_intersections(cloth, bvh)
     try:
         body_copy = _create_body_object(handoff, collection, body)
     except Exception:
