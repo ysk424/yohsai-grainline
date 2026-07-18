@@ -113,11 +113,46 @@ every span inside the crimp reserve, peaks at +0.47%, and is flat from the third
 click onward. That lattice has no seams and no Body contact, so it bounds the
 material terms only; the garment scene remains the real check.
 
+## First end-to-end ZOZO simulation with an animated Body (2026-07-18)
+
+The whole pipeline ran end to end for the first time: PDF pattern -> GRAVITY
+kitsuke -> `Prepare for ZOZO` -> ZOZO MCP configure -> deformation capture ->
+ppf session build -> a full 250-frame solve. The garment stayed a clean draped
+short-sleeve dress on the posed figure; it did not tangle or blow up.
+
+Facts worth keeping:
+
+- **An animated Body needs no Alembic/MDD/shape-key bake.** The Body copy keeps
+  its deforming Armature; ZOZO's `Capture Static Deformation` records the
+  Armature-evaluated mesh per frame into the deformation cache. Baking FK onto
+  the Armature is enough — the modifier deforms the mesh on the timeline and the
+  capture reads it. Order is Capture -> Transfer -> Run Simulation; running
+  before the cache exists is rejected with a "no deformation cache" error.
+- **Capture length is bounded by the influencing action's last keyframe, not by
+  `scene.frame_end`.** Shrinking the scene range does NOT truncate the cache
+  (ppf's `_effective_frame_range`). A Body driven by a 742-keyframe mocap action
+  cached 742 frames even though the scene ended at 250, inflating the cache to
+  ~1.9 GB (225k-vert Body) and timing out the transfer. Fix: trim the driving
+  action's keyframes to the intended sim length (here 250 -> ~644 MB). Keep a
+  fake-user backup of the full action first; it is safe to trim in place only
+  when the action has a single user.
+- **Solve time scales with how much the Body moves, not with cloth failure.**
+  Progressive per-frame slowdown on a high-motion Body is the contact cost
+  rising with Body displacement, not divergence. A heavier mocap simply takes
+  longer; it is not a sign the garment is failing.
+- **One residual near-degenerate self-intersection at the right-sleeve underarm
+  did not block session build or the solve.** ppf's exact predicate can still
+  flag a single-shared-vertex fold that Yohsai's float resolver reports as
+  clean, but it was not fatal here. The heavy 225k-vert Body is a candidate for
+  decimation to shrink the cache independent of frame count.
+
 ## Release
 
-Current packaged release: `yohsai-0.6.5.zip`, the flattened PDF-layer and `//`
-comment release. The working-tree manifest is 0.7.0 for Prepare for ZOZO; no
-0.7.0 archive has been built yet.
+Current packaged release: `yohsai-0.7.7.zip` (built 2026-07-18 into `dist/`,
+617,496 bytes, 36 entries). Verified to contain the auto-capture ZOZO MCP client
+(`zozo_mcp_client.py` calls `capture_static_deformation`), both native DLLs
+(`bin/yohsai_cosserat.dll`, `bin/vcomp140.dll`), and the pypdf parsing wheel.
+The manifest is 0.7.7.
 Its exact size and SHA-256 are reported alongside the built artifact so
 this packaged document does not contain a self-invalidating archive hash.
 
