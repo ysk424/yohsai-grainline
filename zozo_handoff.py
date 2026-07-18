@@ -263,30 +263,46 @@ def _resolve_self_intersections(
     coords = np.array([list(world @ v.co) for v in bm.verts], dtype=np.float64)
     adjacency: list[list[int]] = [[] for _ in range(len(bm.verts))]
     seen = [set() for _ in range(len(bm.verts))]
+    edges: list[tuple[int, int]] = []
     for edge in bm.edges:
         a, b = edge.verts[0].index, edge.verts[1].index
+        edges.append((a, b))
         if b not in seen[a]:
             adjacency[a].append(b); seen[a].add(b)
         if a not in seen[b]:
             adjacency[b].append(a); seen[b].add(a)
     bm.free()
 
-    def detect(current: np.ndarray) -> list[tuple[int, int]]:
+    def involved_vertices(current: np.ndarray) -> set[int]:
         tree = BVHTree.FromPolygons(
-            [Vector(p) for p in current], tris, all_triangles=True, epsilon=0.0
+            [Vector(p) for p in current], tris, all_triangles=True, epsilon=1.0e-7
         )
-        return [
-            (a, b) for a, b in tree.overlap(tree)
-            if a < b and not (face_verts[a] & face_verts[b])
-        ]
+        hits: set[int] = set()
+        # Face-vs-face overlaps catch the deep gather folds cheaply.
+        for a, b in tree.overlap(tree):
+            if a < b and not (face_verts[a] & face_verts[b]):
+                hits.update(tris[a]); hits.update(tris[b])
+        # Edge-vs-triangle piercing is ppf's actual self-intersection test; it
+        # also catches seam and panel-boundary edges (including the loose stitch
+        # edges) that pierce a triangle without any face overlapping.
+        for a, b in edges:
+            start = Vector(current[a])
+            direction = Vector(current[b]) - start
+            length = direction.length
+            if length < 1.0e-9:
+                continue
+            direction = direction / length
+            hit = tree.ray_cast(start + direction * 1.0e-6, direction, length - 2.0e-6)
+            if hit and hit[0] is not None:
+                face = hit[2]
+                if face is not None and a not in tris[face] and b not in tris[face]:
+                    hits.add(a); hits.add(b); hits.update(tris[face])
+        return hits
 
     for _pass in range(max_passes):
-        pairs = detect(coords)
-        if not pairs:
+        involved = involved_vertices(coords)
+        if not involved:
             break
-        involved: set[int] = set()
-        for a, b in pairs:
-            involved.update(tris[a]); involved.update(tris[b])
         for _ring in range(2):  # solve the neighbourhood around each hit, not just the hit
             grown = set(involved)
             for vertex in involved:
@@ -309,7 +325,7 @@ def _resolve_self_intersections(
     for index, vertex in enumerate(mesh.vertices):
         vertex.co = inverse @ Vector(coords[index])
     mesh.update()
-    return len(detect(coords))
+    return len(involved_vertices(coords))
 
 
 def _pattern_positions(obj: bpy.types.Object) -> list[tuple[float, float]]:

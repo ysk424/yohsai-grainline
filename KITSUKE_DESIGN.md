@@ -93,12 +93,15 @@ Pushing intersecting triangles apart does not work: separating one fold cascades
 into new intersections and never converges.  Instead each fold is unfolded by
 smoothing its neighbourhood:
 
-1. Detect the self-intersecting triangle pairs (a BVH self-overlap, excluding
-   pairs that share a vertex) -- the same edge-vs-triangle test ppf uses, so the
-   hits match ppf's own `self_intersection` violations.
-2. Collect the vertices of every intersecting triangle and **expand the set by
-   two rings** along the mesh -- solve the region around each hit, not just the
-   hit.
+1. Detect the hits two ways and take the union of their vertices: a BVH
+   face-vs-face self-overlap (cheap, catches the deep gather folds), and an
+   **edge-vs-triangle** ray test over every mesh edge -- the latter is ppf's
+   actual self-intersection check and is the one that catches seam and
+   panel-boundary edges (including the loose stitch edges) piercing a triangle
+   with no face overlapping, which a face-only test misses.  Pairs/edges that
+   share a vertex with the triangle are excluded.
+2. Expand the hit vertices by **two rings** along the mesh -- solve the region
+   around each hit, not just the hit.
 3. Strongly Laplacian-smooth that region (0.6 toward the neighbour average, four
    sub-iterations) to flatten the crumple.
 4. Repeat until no intersection remains (capped at 40 passes).
