@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import ctypes
 import os
+import sys
 from pathlib import Path
 
 import numpy as np
@@ -119,17 +120,25 @@ def _library_candidates() -> tuple[Path, ...]:
     candidates: list[Path] = []
     if explicit:
         candidates.append(Path(explicit).expanduser())
-    candidates.extend(
-        (
-            root / "bin" / "yohsai_cosserat.dll",
-            root / "bin" / "libyohsai_cosserat.dylib",
-            root / "bin" / "libyohsai_cosserat.so",
-            root / "build" / "bin" / "Release" / "yohsai_cosserat.dll",
-            root / "build" / "bin" / "Debug" / "yohsai_cosserat.dll",
-            root / "build" / "bin" / "libyohsai_cosserat.dylib",
-            root / "build" / "bin" / "libyohsai_cosserat.so",
-        )
+    # Only search for the library flavour that matches the running platform.
+    # The combined (non-split) package ships every platform's binary side by
+    # side, so an unfiltered list would try to ctypes.CDLL a Windows .dll on
+    # macOS and abort before ever reaching the .dylib.
+    if sys.platform == "darwin":
+        names = ("libyohsai_cosserat.dylib",)
+    elif sys.platform.startswith("win"):
+        names = ("yohsai_cosserat.dll",)
+    else:
+        names = ("libyohsai_cosserat.so",)
+    search_dirs = (
+        root / "bin",
+        root / "build" / "bin" / "Release",
+        root / "build" / "bin" / "Debug",
+        root / "build" / "bin",
     )
+    for directory in search_dirs:
+        for name in names:
+            candidates.append(directory / name)
     return tuple(candidates)
 
 
