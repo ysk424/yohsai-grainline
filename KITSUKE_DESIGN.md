@@ -36,6 +36,49 @@ magnitude is constant and only its direction follows the endpoint line; a 50 cm
 and a 5 cm gap therefore receive the same force. At 2 mm, or when the endpoints
 cross during a substep, the pair is captured and held at zero distance.
 
+## Gather sewing
+
+A seam whose two sides were sampled to different vertex counts cannot pair 1:1.
+The arc-length walk fans the shorter side across several of the longer side's
+vertices, so the seam splays into a ladder that never closes and leaves the
+armhole centimetres open. Real garments ease the longer edge (a sleeve cap into
+a shorter armhole) by gathering, which needs equal vertex counts so the longer
+edge bunches between its matched vertices.
+
+At each GRAVITY click, before Sewing, every seam's two sides are measured. When
+they differ, the shorter-side panels are recut so both boundaries carry the
+longer side's count:
+
+- The longer side is kept; the shorter side is resampled up to match it.
+- A sleeve armhole is a closed ring sewn to the composite of the body front and
+  back open chains, so the ring's vertex budget is split across the body panels
+  in proportion to their arc lengths.
+- Only panels that actually change are recut, so the pass is idempotent: a
+  second click with already-matched counts does nothing.
+
+The recut is derived from the parsed pattern stored on the collection, not from
+the current mesh, so the authored curves are never modified. The interior grain
+lattice is untouched; only the seam boundary densifies and its transition band
+re-triangulates. Update restores the original curves, after which the next click
+re-adapts. A recut changes topology, so the current pose is transferred onto the
+new mesh and the stale session and persisted state are dropped, which forces a
+Sewing rebuild on the matched boundaries.
+
+With equal counts the two boundaries pair 1:1 by index (the closed-ring case
+rotates and reflects to the best offset first), so the longer edge gathers
+between its matched vertices instead of splaying into a ladder.
+
+## Residual pinch holes
+
+Matched 1:1 gather closes every seam except a few isolated points where the body
+sits between the two sides (shoulder, underarm) and holds them apart; these
+settle roughly a centimetre open and do not close with more clicks because the
+body, not penetration, is the obstacle. At the ZOZO hand-off each residual pair
+is excluded from the stitch opening and welded onto whichever endpoint sits
+farther outside the body, so the adjacent panel triangles stretch across the
+hole without bending the panels or entering the body. Like a real 2 mm stitch
+line this is a small, deliberate imperfection, accepted as part of the garment.
+
 ## Body contact
 
 Body is a fixed collider. Candidate lookup uses the evaluated world-space Body
